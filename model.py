@@ -5,7 +5,7 @@ import urllib
 import zipfile
 import os
 from pathlib import Path
-
+from safetensors.torch import load_file
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 LLAMA32_CONFIG = {
@@ -25,28 +25,6 @@ LLAMA32_CONFIG = {
         "original_context_length": 8192,
     }
 }
-# def download_and_read_file(url, zip_path, extracted_path, data_file_path):
-#     """
-#     Downloads, extracts, and renames the main training text file from Wikitext-103 corpus.
-#     """
-#     if data_file_path.exists():
-#         print(f"{data_file_path} already exists. Skipping download and extraction.")
-#         return
-
-#     # Download the ZIP
-#     with urllib.request.urlopen(url) as response:
-#         with open(zip_path, "wb") as out_file:
-#             out_file.write(response.read())
-
-#     # Unzip the file
-#     with zipfile.ZipFile(zip_path, "r") as zip_ref:
-#         zip_ref.extractall(extracted_path)
-
-#     # Rename main training file
-#     original_file_path = Path(extracted_path) / "wiki.train.tokens"
-#     os.rename(original_file_path, data_file_path)
-
-#     print(f"File downloaded and saved as {data_file_path}")
 
 class Tokenizer:
     """Thin wrapper around tiktoken that keeps track of Llama-3 special IDs."""
@@ -298,15 +276,19 @@ class TransformerBlock(nn.Module):
         self.norm1 = RMSNorm(cfg["emb_dim"]) 
         self.norm2 = RMSNorm(cfg["emb_dim"])
         self.ffn = FeedForward(cfg)
-    def forward(self,x,mask,cos,sin):
+    def forward(self, x, mask, cos, sin, past_kv=None, use_cache=False):
         shortcut = x
         x = self.norm1(x)
-        x = self.attn(x,cos,sin)
-        x += shortcut
+        if use_cache:
+            x, kv = self.attn(x, mask, cos, sin, past_kv=past_kv, use_cache=True)
+        else:
+            x = self.attn(x, mask, cos, sin)
+            kv = None
+        x = x + shortcut
 
         x = self.norm2(x)
         x = self.ffn(x)
-        x += shortcut
+        x = x + shortcut
 class Llama3Model(nn.Module):
     def __init__(self, cfg):
         super().__init__()
@@ -333,21 +315,28 @@ class Llama3Model(nn.Module):
         self.cfg = cfg
 
 
-    def forward(self, in_idx):
-        # Forward pass
-        tok_embeds = self.tok_emb(in_idx)
+    def forward(self, in_idx, past_kv=None, use_cache=False):
+    # Embedding
+        tok_embeds = self.tok_emb(in_idx)  # (b, seq_len, emb_dim)
         x = tok_embeds
 
         num_tokens = x.shape[1]
         mask = torch.triu(torch.ones(num_tokens, num_tokens, device=x.device, dtype=torch.bool), diagonal=1)
-        
-        for block in self.trf_blocks:
-            x = block(x, mask, self.cos, self.sin)
+
+        new_kv_cache = [] if use_cache else None
+        for i, block in enumerate(self.trf_blocks):
+            past_layer_kv = past_kv[i] if past_kv is not None else None
+            x, updated_kv = block(x, mask, self.cos, self.sin, past_kv=past_layer_kv, use_cache=use_cache)
+            if use_cache:
+                new_kv_cache.append(updated_kv)
+
         x = self.final_norm(x)
         logits = self.out_head(x.to(self.cfg["dtype"]))
+
+        if use_cache:
+            return logits, new_kv_cache
         return logits
 #Load Pretrained weights
-
 def assign(left, right, tensor_name="unknown"):
     if left.shape != right.shape:
         raise ValueError(f"Shape mismatch in tensor '{tensor_name}'. Left: {left.shape}, Right: {right.shape}")
@@ -421,6 +410,43 @@ def load_weights_into_llama(model, param_config, params):
         model.out_head.weight = assign(model.out_head.weight, params["model.embed_tokens.weight"], "model.embed_tokens.weight")
         print("Model uses weight tying.")
 
+def generate(model, idx, max_new_tokens, context_size, temperature=0.0, top_k=None, eos_id=None):
+    past_kv = None  # Initialize cache
+
+    for step in range(max_new_tokens):
+        if past_kv is None:
+            idx_cond = idx[:, -context_size:]
+        else:
+            idx_cond = idx[:, -1:]
+
+        with torch.no_grad():
+            if past_kv is None:
+                logits, past_kv = model(idx_cond, use_cache=True)
+            else:
+                logits, past_kv = model(idx_cond, past_kv=past_kv, use_cache=True)
+
+        logits = logits[:, -1, :]
+
+        # Top-k filtering
+        if top_k is not None:
+            top_logits = torch.topk(logits,top_k)
+            min_val = top_logits[:,-1]
+            logits = torch.where(logits<min_val.unsqueeze(-1),torch.tensor(float("-inf"),device=logits.device))
+
+        # Temperature / greedy decoding
+        if temperature > 0.0:
+            logits = logits / temperature
+            probs = torch.softmax(logits,dim=-1)
+            idx_next = torch.multinomial(probs,num_samples=1)
+        else:
+            idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+        if eos_id is not None and (idx_next == eos_id).all():
+            break
+        # Append new token to sequence
+        idx = torch.cat((idx, idx_next), dim=1)
+
+    return idx
+
 #-----------------------------------------------------------------------------------Training---------------------------------------------------------------------------------------- 
 if __name__ == "__main__":
     # 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
@@ -441,3 +467,30 @@ if __name__ == "__main__":
         filename="original/tokenizer.model",
         local_dir=f"Llama-3.2-{LLAMA_SIZE_STR}-Instruct"
     )
+    tokenizer = Tokenizer(tokenizer_file_path)
+    if LLAMA_SIZE_STR == "1B":
+        weights_file = hf_hub_download(
+            repo_id=f"meta-llama/Llama-3.2-{LLAMA_SIZE_STR}-Instruct",
+            filename="model.safetensors",
+            local_dir=f"Llama-3.2-{LLAMA_SIZE_STR}-Instruct"
+        )
+        combined_weights = load_file(weights_file)
+
+
+    else:
+        combined_weights = {}
+        for i in range(1, 3):
+            weights_file = hf_hub_download(
+                repo_id=f"meta-llama/Llama-3.2-{LLAMA_SIZE_STR}-Instruct",
+                filename=f"model-0000{i}-of-00002.safetensors",
+                local_dir=f"Llama-3.2-{LLAMA_SIZE_STR}-Instruct"
+            )
+            current_weights = load_file(weights_file)
+            combined_weights.update(current_weights)
+
+
+    model = Llama3Model(LLAMA32_CONFIG)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+
+
+    model.to(device)
