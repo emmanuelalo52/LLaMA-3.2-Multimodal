@@ -148,10 +148,10 @@ class RMSNorm(nn.Module):
     
 
 #Rotary Postional Embedding 
-def compute_rope_params(head_dim,theta=10_000,context_length=4096,freq_config=None,dtype=torch.float32):
+def compute_rope_params(head_dim,theta_base=10_000,context_length=4096,freq_config=None,dtype=torch.float32):
     assert head_dim % 2 == 0, "embedding dimension must be even"
     #inverse frequency
-    iver_freq = 1.0/(theta **(torch.arange(0,head_dim,2,dtype=dtype)[: (head_dim//2)].float()/head_dim))
+    inv_freq = 1.0/(theta_base **(torch.arange(0,head_dim,2,dtype=dtype)[: (head_dim//2)].float()/head_dim))
     # Frequency adjustments
     if freq_config is not None:
         low_freq_wavelen = freq_config["original_context_length"] / freq_config["low_freq_factor"]
@@ -203,9 +203,9 @@ def rope(x,cos,sin):
 class FeedForward(nn.Module):
     def __init__(self,cfg):
         super().__init__()
-        self.fc1 = nn.Linear(cfg["emb_dim"],cfg["hidden_dim"],dtype=["dtype"],bias=False)
-        self.fc2 = nn.Linear(cfg["emb_dim"],cfg["hidden_dim"],dtype=["dtype"],bias=False)
-        self.fc3 = nn.Linear(cfg["hidden_dim"],cfg["emb_dim"],dtype=["dtype"],bias=False)
+        self.fc1 = nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], dtype=cfg["dtype"], bias=False)
+        self.fc2 = nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], dtype=cfg["dtype"], bias=False)
+        self.fc3 = nn.Linear(cfg["hidden_dim"],cfg["emb_dim"],dtype=cfg["dtype"],bias=False)
     def forward(self,x):
         fc1 = self.fc1(x)
         fc2 = self.fc2(x)
@@ -300,7 +300,7 @@ class Llama3Model(nn.Module):
             [TransformerBlock(cfg) for _ in range(cfg["n_layers"])]
         )
 
-        self.final_norm = RMSNorm(cfg["emb_dim"], eps=1e-5, dtype=cfg["dtype"])
+        self.final_norm = RMSNorm(cfg["emb_dim"], eps=1e-5)
         self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False, dtype=cfg["dtype"])
 
         # Reusuable utilities
