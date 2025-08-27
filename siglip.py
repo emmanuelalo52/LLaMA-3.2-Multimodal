@@ -155,7 +155,7 @@ class SiglipEncoder(nn.Module):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList(
-            [SiglipEncoder(config) for _ in range(config.num_hidden_layers)]
+            [SiglipVisionEncoder(config) for _ in range(config.num_hidden_layers)]
         )
 
     # Ignore copy
