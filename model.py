@@ -98,10 +98,10 @@ def generate(model, idx, max_new_tokens, context_size, temperature=1.0, top_k=No
         idx = torch.cat((idx, idx_next), dim=-1)
     return idx
 
-def assign(left, right):
-    if left.shape != right.shape:
-        raise ValueError(f"Shape mismatch. Left: {left.shape}, Right: {right.shape}")
-    return torch.nn.Parameter(torch.tensor(right))
+# def assign(left, right):
+#     if left.shape != right.shape:
+#         raise ValueError(f"Shape mismatch. Left: {left.shape}, Right: {right.shape}")
+#     return torch.nn.Parameter(torch.tensor(right))
 
 
 #Add LoRA
@@ -256,8 +256,8 @@ class GroupQueryAttention(nn.Module):
 
         if past_kv is not None:
             past_k, past_v = past_kv  # both: (b, h, past_s, d)
-            k = torch.cat([past_k, k], dim=2)
-            v = torch.cat([past_v, v], dim=2)
+            keys = torch.cat([past_k, keys], dim=2)
+            values = torch.cat([past_v, values], dim=2)
         #attention score
         attn_score = queries @ keys.transpose(2,3)
         # mask = self.mask[:num_tokens,:num_tokens].bool()
@@ -280,7 +280,7 @@ class TransformerBlock(nn.Module):
         shortcut = x
         x = self.norm1(x)
         if use_cache:
-            x, kv = self.attn(x, mask, cos, sin, past_kv=past_kv, use_cache=True)
+            x, kv = self.attn((x,kv), mask, cos, sin, past_kv=past_kv, use_cache=True)
         else:
             x = self.attn(x, mask, cos, sin)
             kv = None
@@ -430,7 +430,7 @@ def generate(model, idx, max_new_tokens, context_size, temperature=0.0, top_k=No
         # Top-k filtering
         if top_k is not None:
             top_logits = torch.topk(logits,top_k)
-            min_val = top_logits[:,-1]
+            min_val = top_logits[:,-1].unsqueeze(-1)
             logits = torch.where(logits<min_val.unsqueeze(-1),torch.tensor(float("-inf"),device=logits.device))
 
         # Temperature / greedy decoding

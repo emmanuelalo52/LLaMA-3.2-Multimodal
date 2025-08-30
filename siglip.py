@@ -93,7 +93,7 @@ class SiglipAttention(nn.Module):
 
     def forward(self,hidden_states):
         batch_size, seq_len,_ = hidden_states.shape
-        keys_state = self.k_proj.view(hidden_states)
+        keys_state = self.k_proj(hidden_states)
         query_state = self.q_proj(hidden_states)
         value_state = self.v_proj(hidden_states)
 
@@ -192,8 +192,8 @@ class SiglipVisionTransformer(nn.Module):
         self.layernorm = nn.LayerNorm(embed_dim,eps=config.layer_norm_eps)
     def forward(self,pixel_values:torch.Tensor):
         #dimension [Batch_size,channels,height,width] -> dimension[Batch_size,num_patches,Embed_dim]
-        hidden_states = self.embedding
-        last_hidden_state = self.encoder(input=hidden_states)
+        hidden_states = self.embedding(pixel_values)
+        last_hidden_state = self.encoder(hidden_states)
         last_hidden_state = self.layernorm(last_hidden_state)
 
         return last_hidden_state
