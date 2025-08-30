@@ -37,7 +37,7 @@
 8. [Training / Fine‑tuning Recipes (LoRA & adapters)](#training--fine-tuning-recipes-lora--adapters)  
    - Example LoRA-only training loop  
    - Saving / Loading adapter weights  
-9. [Debugging & Known Issues (Concrete)](#debugging--known-issues-concrete)  
+9. [Recent Issues found & fixed (Concrete)](#debugging--known-issues-concrete)  
 10. [Testing Checklist & Unit Tests to add](#testing-checklist--unit-tests-to-add)  
 11. [Performance, Memory & Precision guidance](#performance-memory--precision-guidance)  
 12. [Contributing, License & Citation](#contributing-license--citation)  
