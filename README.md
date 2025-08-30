@@ -508,9 +508,9 @@ torch.save(adapter_state, "lora_adapters.pth")
 
 ---
 
-# Recent Issues (Concrete)
+# Recent Issues found & fixed(Concrete)
 
-Below are *file- and function-level* problems found in the uploaded code and suggested fixes — crucial when you try to run/train this code.
+Below are *file- and function-level* problems found in the uploaded code and fixed — crucial when you try to run/train this code.
 
 ### `model.py` issues and fixes
 1. **Duplicate `assign` function.** `assign` is defined twice. Keep the latter that validates shapes and returns `torch.nn.Parameter(...)`. Remove or rename the other.
@@ -593,19 +593,6 @@ This README incorporates and expands content from the original README plus the t
 - **`processing_siglip.py`**: image preprocessing utilities (resize, rescale, normalize, process_images) and `paligemmaProcessor` (adds image tokens to prompts and returns pixel values + tokenizer inputs). README documents the default mean/std/rescale and corrections needed for tokenizer integration.
 - **`siglip.py`**: SigLIP vision backbone (patch conv embedding, position embeddings, `SiglipAttention`, MLP, encoder, and `SiglipModel`). README points out code fixes needed (projection calls, transformer forward).
 
----
-
-# Where to go next (practical TODOs)
-- Fix the small but critical bugs called out above in `siglip.py` and `processing_siglip.py`.
-- Decide on your multimodal fusion approach — start with **prepend visual tokens** and the `AdaptiveAvgPool1d` projection trick.
-- Wire `Linear_LORA` to attention and MLP projections (create a helper `convert_to_lora(model, target_modules, rank, alpha)`).
-- Add unit tests for all numerical modules (`rope`, `GQA`, `SiglipAttention`).
-- Add example notebooks demonstrating:
-  - Text-only generation (1B size).
-  - Visual token prepending demo with one image and a question (toy).
-  - Saving/loading LoRA adapters and applying them.
-
----
 
 # Appendix — Short Code Snippets & Utilities
 

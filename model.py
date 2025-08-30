@@ -17,7 +17,7 @@ LLAMA32_CONFIG = {
     "hidden_dim": 8192,              # Size of the intermediate dimension in FeedForward
     "n_kv_groups": 8,                # Key-Value groups for grouped-query attention
     "rope_base": 500_000.0,          # The base in RoPE's "theta"
-    "dtype": torch.bfloat16,         # Lower-precision dtype to reduce memory usage
+    "dtype": torch.float16,         # Lower-precision dtype to reduce memory usage. For higher GPUs use 'torch.bfloat16'
     "rope_freq": {                   # RoPE frequency scaling
         "factor": 32.0,
         "low_freq_factor": 1.0,
@@ -209,7 +209,7 @@ class FeedForward(nn.Module):
     def forward(self,x):
         fc1 = self.fc1(x)
         fc2 = self.fc2(x)
-        x = Functional.silu(fc1) * fc2
+        x = Functional.silu(fc1 * fc2) 
         return self.fc3(x)
     
     
