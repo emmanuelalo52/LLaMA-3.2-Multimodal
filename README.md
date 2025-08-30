@@ -1,5 +1,5 @@
 # 🦙 LLaMA‑3.2 Multimodal (WIP)
-**(Text backbone + LoRA + RoPE + GQA) + SigLIP Vision (scaffolded)**
+**(Text backbone + LoRA + RoPE + GQA) + SigLIP Vision**
 
 > **Status:** 🚧 **Active development.**  
 > The **text backbone** (tokenizer, model blocks, RoPE, GQA attention, KV‑cache, weight loading, and an autoregressive generator) is implemented and runnable for inference.  
