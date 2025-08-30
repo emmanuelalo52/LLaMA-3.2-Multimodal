@@ -508,7 +508,7 @@ torch.save(adapter_state, "lora_adapters.pth")
 
 ---
 
-# Debugging & Known Issues (Concrete)
+# Recent Issues (Concrete)
 
 Below are *file- and function-level* problems found in the uploaded code and suggested fixes — crucial when you try to run/train this code.
 
