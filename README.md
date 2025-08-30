@@ -1,4 +1,4 @@
-# 🦙 LLaMA‑3.2 Multimodal (WIP) — Deep Technical README
+# 🦙 LLaMA‑3.2 Multimodal (WIP)
 **(Text backbone + LoRA + RoPE + GQA) + SigLIP Vision (scaffolded)**
 
 > **Status:** 🚧 **Active development.**  
