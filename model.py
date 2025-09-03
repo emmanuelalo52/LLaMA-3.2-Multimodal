@@ -231,7 +231,7 @@ class GroupQueryAttention(nn.Module):
 
         self.W_query = nn.Linear(d_in, d_out, bias=False, dtype=dtype)
         self.out_proj = nn.Linear(d_out, d_out, bias=False, dtype=dtype)
-    def forward(self,x,cos,sin,mask,past_kv=None,use_cache=False):
+    def forward(self,x,cos,sin,mask):
         b,num_tokens,d_in = x.shape
         query = self.W_query(x)
         key = self.W_key(x)
@@ -254,14 +254,10 @@ class GroupQueryAttention(nn.Module):
         keys = keys.repeat_interleave(self.group_size,dim=1)
         values = values.repeat_interleave(self.group_size,dim=1)
 
-        if past_kv is not None:
-            past_k, past_v = past_kv  # both: (b, h, past_s, d)
-            keys = torch.cat([past_k, keys], dim=2)
-            values = torch.cat([past_v, values], dim=2)
         #attention score
         attn_score = queries @ keys.transpose(2,3)
         # mask = self.mask[:num_tokens,:num_tokens].bool()
-        attn_score = attn_score .masked_fill(mask,float("-inf"))
+        attn_score = attn_score.masked_fill(mask,float("-inf"))
         
         attn_weight = torch.softmax(attn_score/(keys.shape[-1]**0.5),dim=-1)
         context_vector = (attn_weight @ values).transpose(1,2)
@@ -276,14 +272,10 @@ class TransformerBlock(nn.Module):
         self.norm1 = RMSNorm(cfg["emb_dim"]) 
         self.norm2 = RMSNorm(cfg["emb_dim"])
         self.ffn = FeedForward(cfg)
-    def forward(self, x, mask, cos, sin, past_kv=None, use_cache=False):
+    def forward(self, x, mask, cos, sin):
         shortcut = x
         x = self.norm1(x)
-        if use_cache:
-            x, kv = self.attn((x,kv), mask, cos, sin, past_kv=past_kv, use_cache=True)
-        else:
-            x = self.attn(x, mask, cos, sin)
-            kv = None
+        x = self.attn(x, mask, cos, sin)
         x = x + shortcut
 
         x = self.norm2(x)
@@ -315,27 +307,20 @@ class Llama3Model(nn.Module):
         self.cfg = cfg
 
 
-    def forward(self, in_idx, past_kv=None, use_cache=False):
-    # Embedding
-        tok_embeds = self.tok_emb(in_idx)  # (b, seq_len, emb_dim)
+    def forward(self, in_idx):
+        # Forward pass
+        tok_embeds = self.tok_emb(in_idx)
         x = tok_embeds
 
         num_tokens = x.shape[1]
         mask = torch.triu(torch.ones(num_tokens, num_tokens, device=x.device, dtype=torch.bool), diagonal=1)
-
-        new_kv_cache = [] if use_cache else None
-        for i, block in enumerate(self.trf_blocks):
-            past_layer_kv = past_kv[i] if past_kv is not None else None
-            x, updated_kv = block(x, mask, self.cos, self.sin, past_kv=past_layer_kv, use_cache=use_cache)
-            if use_cache:
-                new_kv_cache.append(updated_kv)
-
+        
+        for block in self.trf_blocks:
+            x = block(x, mask, self.cos, self.sin)
         x = self.final_norm(x)
         logits = self.out_head(x.to(self.cfg["dtype"]))
-
-        if use_cache:
-            return logits, new_kv_cache
         return logits
+    
 #Load Pretrained weights
 def assign(left, right, tensor_name="unknown"):
     if left.shape != right.shape:
