@@ -17,7 +17,7 @@ LLAMA32_CONFIG = {
     "hidden_dim": 8192,              # Size of the intermediate dimension in FeedForward
     "n_kv_groups": 8,                # Key-Value groups for grouped-query attention
     "rope_base": 500_000.0,          # The base in RoPE's "theta"
-    "dtype": torch.float16,         # Lower-precision dtype to reduce memory usage. For higher GPUs use 'torch.bfloat16'
+    "dtype": torch.bfloat16,         # Lower-precision dtype to reduce memory usage. For lower GPUs use 'torch.float16'
     "rope_freq": {                   # RoPE frequency scaling
         "factor": 32.0,
         "low_freq_factor": 1.0,
