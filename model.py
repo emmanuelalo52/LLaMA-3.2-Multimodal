@@ -463,16 +463,16 @@ if __name__ == "__main__":
 
     # Download tokenizer
     tokenizer_file_path = hf_hub_download(
-        repo_id=f"meta-llama/Llama-3.2-{LLAMA_SIZE_STR}-Instruct",
+        repo_id=f"meta-llama/Llama-3.2-{LLAMA_SIZE_STR}",
         filename="original/tokenizer.model",
-        local_dir=f"Llama-3.2-{LLAMA_SIZE_STR}-Instruct"
+        local_dir=f"Llama-3.2-{LLAMA_SIZE_STR}"
     )
     tokenizer = Tokenizer(tokenizer_file_path)
     if LLAMA_SIZE_STR == "1B":
         weights_file = hf_hub_download(
-            repo_id=f"meta-llama/Llama-3.2-{LLAMA_SIZE_STR}-Instruct",
+            repo_id=f"meta-llama/Llama-3.2-{LLAMA_SIZE_STR}",
             filename="model.safetensors",
-            local_dir=f"Llama-3.2-{LLAMA_SIZE_STR}-Instruct"
+            local_dir=f"Llama-3.2-{LLAMA_SIZE_STR}"
         )
         combined_weights = load_file(weights_file)
 
@@ -481,9 +481,9 @@ if __name__ == "__main__":
         combined_weights = {}
         for i in range(1, 3):
             weights_file = hf_hub_download(
-                repo_id=f"meta-llama/Llama-3.2-{LLAMA_SIZE_STR}-Instruct",
+                repo_id=f"meta-llama/Llama-3.2-{LLAMA_SIZE_STR}",
                 filename=f"model-0000{i}-of-00002.safetensors",
-                local_dir=f"Llama-3.2-{LLAMA_SIZE_STR}-Instruct"
+                local_dir=f"Llama-3.2-{LLAMA_SIZE_STR}"
             )
             current_weights = load_file(weights_file)
             combined_weights.update(current_weights)
