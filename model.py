@@ -395,42 +395,6 @@ def load_weights_into_llama(model, param_config, params):
         model.out_head.weight = assign(model.out_head.weight, params["model.embed_tokens.weight"], "model.embed_tokens.weight")
         print("Model uses weight tying.")
 
-def generate(model, idx, max_new_tokens, context_size, temperature=0.0, top_k=None, eos_id=None):
-    past_kv = None  # Initialize cache
-
-    for step in range(max_new_tokens):
-        if past_kv is None:
-            idx_cond = idx[:, -context_size:]
-        else:
-            idx_cond = idx[:, -1:]
-
-        with torch.no_grad():
-            if past_kv is None:
-                logits, past_kv = model(idx_cond, use_cache=True)
-            else:
-                logits, past_kv = model(idx_cond, past_kv=past_kv, use_cache=True)
-
-        logits = logits[:, -1, :]
-
-        # Top-k filtering
-        if top_k is not None:
-            top_logits = torch.topk(logits,top_k)
-            min_val = top_logits[:,-1].unsqueeze(-1)
-            logits = torch.where(logits<min_val.unsqueeze(-1),torch.tensor(float("-inf"),device=logits.device))
-
-        # Temperature / greedy decoding
-        if temperature > 0.0:
-            logits = logits / temperature
-            probs = torch.softmax(logits,dim=-1)
-            idx_next = torch.multinomial(probs,num_samples=1)
-        else:
-            idx_next = torch.argmax(logits, dim=-1, keepdim=True)
-        if eos_id is not None and (idx_next == eos_id).all():
-            break
-        # Append new token to sequence
-        idx = torch.cat((idx, idx_next), dim=1)
-
-    return idx
 
 #-----------------------------------------------------------------------------------Training---------------------------------------------------------------------------------------- 
 if __name__ == "__main__":
