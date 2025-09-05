@@ -6,7 +6,7 @@ import torch.nn as nn
 class SiglipVisionConfig:
     def __init__(self,
                  hidden_size=768,
-                 intermediate_size=12,
+                 intermediate_size=3072,
                  num_hidden_layers=12,
                  num_attention_heads=12,
                  num_channels=3,
@@ -93,7 +93,7 @@ class SiglipAttention(nn.Module):
 
     def forward(self,hidden_states):
         batch_size, seq_len,_ = hidden_states.shape
-        keys_state = self.k_proj(hidden_states)
+        keys_state = self.k_proj.view(hidden_states)
         query_state = self.q_proj(hidden_states)
         value_state = self.v_proj(hidden_states)
 
@@ -138,7 +138,7 @@ class SiglipVisionEncoder(nn.Module):
         residual = hidden_state
         hidden_state = self.layernorm1(hidden_state)
         # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_state = self.self_attn(hidden_state)
+        hidden_state,_ = self.self_attn(hidden_state)
         # [Batch_Size, Num_Patches, Embed_Dim]
         hidden_state  = residual + hidden_state
 
@@ -187,13 +187,13 @@ class SiglipVisionTransformer(nn.Module):
         super().__init__()
         embed_dim = config.hidden_size
         self.embedding = SiglipVisionEmbedding(config)
-        self.encoder = SiglipVisionEncoder(config)
+        self.encoder = SiglipEncoder(config)
 
         self.layernorm = nn.LayerNorm(embed_dim,eps=config.layer_norm_eps)
     def forward(self,pixel_values:torch.Tensor):
         #dimension [Batch_size,channels,height,width] -> dimension[Batch_size,num_patches,Embed_dim]
-        hidden_states = self.embedding(pixel_values)
-        last_hidden_state = self.encoder(hidden_states)
+        hidden_states = self.embedding
+        last_hidden_state = self.encoder(input=hidden_states)
         last_hidden_state = self.layernorm(last_hidden_state)
 
         return last_hidden_state
