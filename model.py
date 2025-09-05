@@ -268,18 +268,18 @@ class GroupQueryAttention(nn.Module):
 class TransformerBlock(nn.Module):
     def __init__(self,cfg):
         super().__init__()
-        self.attn = GroupQueryAttention(d_in=cfg["emb_dim"],d_out=cfg["emb_dim"],num_heads=cfg["n_heads"],num_kv_groups=cfg["n_kv_groups"],dtype=cfg["dtype"])
+        self.att = GroupQueryAttention(d_in=cfg["emb_dim"],d_out=cfg["emb_dim"],num_heads=cfg["n_heads"],num_kv_groups=cfg["n_kv_groups"],dtype=cfg["dtype"])
         self.norm1 = RMSNorm(cfg["emb_dim"]) 
         self.norm2 = RMSNorm(cfg["emb_dim"])
-        self.ffn = FeedForward(cfg)
+        self.ff = FeedForward(cfg)
     def forward(self, x, mask, cos, sin):
         shortcut = x
         x = self.norm1(x)
-        x = self.attn(x, mask, cos, sin)
+        x = self.att(x, cos, sin, mask)
         x = x + shortcut
 
         x = self.norm2(x)
-        x = self.ffn(x)
+        x = self.ff(x)
         x = x + shortcut
 class Llama3Model(nn.Module):
     def __init__(self, cfg):
