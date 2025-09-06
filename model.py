@@ -26,6 +26,17 @@ LLAMA32_CONFIG = {
     }
 }
 
+
+def repeat_kv(hidden_states, n_rep):
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 class Tokenizer:
     """Thin wrapper around tiktoken that keeps track of Llama-3 special IDs."""
     def __init__(self, model_path):
@@ -148,7 +159,7 @@ class RMSNorm(nn.Module):
     
 
 #Rotary Postional Embedding 
-def compute_rope_params(head_dim,theta_base=10_000,context_length=4096,freq_config=None,dtype=torch.float32):
+def compute_rope_params(head_dim,theta_base=10_000,context_length=4096,freq_config=None,dtype=torch.float32,position_ids=None):
     assert head_dim % 2 == 0, "embedding dimension must be even"
     #inverse frequency
     inv_freq = 1.0/(theta_base **(torch.arange(0,head_dim,2,dtype=dtype)[: (head_dim//2)].float()/head_dim))
@@ -175,9 +186,10 @@ def compute_rope_params(head_dim,theta_base=10_000,context_length=4096,freq_conf
         inv_freq_llama = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
         inv_freq = inv_freq_llama
     #positons
-    postion = torch.arange(context_length,dtype=dtype)
+    if position_ids is None:
+        postion_ids = torch.arange(context_length,dtype=dtype)
     #angles
-    angles = postion[:,None] * inv_freq[None,:]
+    angles = postion_ids[:,None] * inv_freq[None,:]
     #expand angles to match head_dim
     angles = torch.cat([angles,angles],dim=1)
     #sin and cos
@@ -199,7 +211,7 @@ def rope(x,cos,sin):
     x_rotated = (x*cos) + (rotated * sin)
     return x_rotated.to(dtype=x.dtype)
 
-#Feed forward
+# Feed forward
 class FeedForward(nn.Module):
     def __init__(self,cfg):
         super().__init__()
@@ -251,8 +263,8 @@ class GroupQueryAttention(nn.Module):
         queries= rope(queries,cos,sin)
 
         #expand to maximum length
-        keys = keys.repeat_interleave(self.group_size,dim=1)
-        values = values.repeat_interleave(self.group_size,dim=1)
+        keys = repeat_kv(keys,self.group_size)
+        values = repeat_kv(values,self.group_size)
 
         #attention score
         attn_score = queries @ keys.transpose(2,3)
@@ -306,8 +318,10 @@ class Llama3Model(nn.Module):
         self.register_buffer("sin", sin, persistent=False)
         self.cfg = cfg
 
+    def get_input_embeeddings(self):
+        return self.tok_emb
 
-    def forward(self, in_idx):
+    def forward(self, in_idx,kv_cache,input_embeds):
         # Forward pass
         tok_embeds = self.tok_emb(in_idx)
         x = tok_embeds
