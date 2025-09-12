@@ -25,7 +25,21 @@ LLAMA32_CONFIG = {
         "original_context_length": 8192,
     }
 }
-
+class LlamaVLMConfig:
+    """Configuration for Llama-based VLM"""
+    def __init__(self):
+        # Vision configuration (SigLIP)
+        self.vision_config = {
+            "hidden_size": 768,
+            "intermediate_size": 3072,
+            "num_hidden_layers": 12,
+            "num_attention_heads": 12,
+            "num_channels": 3,
+            "image_size": 224,
+            "patch_size": 16,
+            "layer_norm_eps": 1e-6,
+            "attention_dropout": 0.0,
+        }
 
 def repeat_kv(hidden_states, n_rep):
     """
@@ -293,6 +307,16 @@ class TransformerBlock(nn.Module):
         x = self.norm2(x)
         x = self.ff(x)
         x = x + shortcut
+
+class MultiModalProjector(nn.Module):
+    def __init__(self,config):
+        super().__init__()
+        self.config = config
+        self.linear = nn.Linear(config.vocab_size,config.hidden_size,config.padding_idx)
+    def forward(self,image_features):
+        hidden_states = self.linear(image_features)
+        return hidden_states
+
 class Llama3Model(nn.Module):
     def __init__(self, cfg):
         super().__init__()
