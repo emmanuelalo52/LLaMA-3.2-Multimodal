@@ -61,7 +61,7 @@ class MLLAMAConfig():
         self.hidden_size = hidden_size
         self.vision_config = vision_config
         self.is_encoder_decoder = False
-        self.pad_token_id = pad_token_index
+        self.pad_token_index = pad_token_index
 
         self.vision_config = SiglipVisionConfig(**vision_config)
         self.text_config = text_config  
@@ -333,7 +333,7 @@ class TransformerBlock(nn.Module):
 class MultiModalProjector(nn.Module):
     def __init__(self,config:MLLAMAConfig):
         super().__init__()
-        self.linear = nn.Linear(config.vision_config["hidden_size"],config.vision_config["  "])
+        self.linear = nn.Linear(config.vision_config.hidden_size,config.vision_config.projection_dim)
     def forward(self,image_features):
         hidden_states = self.linear(image_features)
         return hidden_states
