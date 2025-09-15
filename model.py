@@ -8,23 +8,38 @@ from pathlib import Path
 from safetensors.torch import load_file
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
-LLAMA32_CONFIG = {
-    "vocab_size": 128_256,           # Vocabulary size
-    "context_length": 131_072,       # Context length that was used to train the model
-    "emb_dim": 2048,                 # Embedding dimension
-    "n_heads": 32,                   # Number of attention heads
-    "n_layers": 16,                  # Number of layers
-    "hidden_dim": 8192,              # Size of the intermediate dimension in FeedForward
-    "n_kv_groups": 8,                # Key-Value groups for grouped-query attention
-    "rope_base": 500_000.0,          # The base in RoPE's "theta"
-    "dtype": torch.bfloat16,         # Lower-precision dtype to reduce memory usage. For lower GPUs use 'torch.float16'
-    "rope_freq": {                   # RoPE frequency scaling
-        "factor": 32.0,
-        "low_freq_factor": 1.0,
-        "high_freq_factor": 4.0,
-        "original_context_length": 8192,
-    }
-}
+
+class LLAMA32Config():
+    def __init__(self,
+                 vocab_size=128256,
+                 context_length=131072,
+                 emb_dim=2048,
+                 n_heads=32,
+                 n_layers=16,
+                 hidden_dim=8192,
+                 n_kv_groups=8,
+                 rope_base=500000,
+                 dtype=torch.bfloat16,
+                 rope_freq=None,
+                 **kwargs,):
+        super().__init__()
+        self.vocab_size = vocab_size # Vocabulary size
+        self.context_length = context_length # Context length that was used to train the model
+        self.emb_dim = emb_dim # Embedding dimension
+        self.n_heads = n_heads # Number of attention heads
+        self.n_layers = n_layers # Number of layers
+        self.hidden_dim = hidden_dim # Size of the intermediate dimension in FeedForward
+        self.n_kv_groups = n_kv_groups # Key-Value groups for grouped-query attention
+        self.rope_base = rope_base # The base in RoPE's "theta"
+        self.dtype = dtype # Lower-precision dtype to reduce memory usage. For lower GPUs use 'torch.float16'
+        self.rope_freq = rope_freq if rope_freq is not None else { # RoPE frequency scaling
+            "factor": 32.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_context_length": 8192,
+        }
+
+        
 class LlamaVLMConfig:
     """Configuration for Llama-based VLM"""
     def __init__(self):
@@ -100,28 +115,6 @@ def text_to_tokens(text, tokenizer):
 def token_to_text(token_ids, tokenizer):
     flat = token_ids.squeeze(0)
     return tokenizer.decode(flat.tolist())
-
-def generate(model, idx, max_new_tokens, context_size, temperature=1.0, top_k=None, eos_id=None):
-    device = next(model.parameters()).device
-    idx = idx.to(device)
-    for _ in range(max_new_tokens):
-        idx_cond = idx[:, -context_size:]
-        with torch.no_grad():
-            logits = model(idx_cond)[:, -1, :]
-        if top_k:
-            top_logits, _ = torch.topk(logits, top_k)
-            min_val = top_logits[:, -1]
-            logits = torch.where(logits < min_val.unsqueeze(-1), torch.tensor(float('-inf'), device=logits.device), logits)
-        if temperature > 0.0:
-            logits = logits / temperature
-            probs = torch.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
-        else:
-            idx_next = torch.argmax(logits, dim=-1, keepdim=True)
-        if eos_id is not None and idx_next.item() == eos_id:
-            break
-        idx = torch.cat((idx, idx_next), dim=-1)
-    return idx
 
 # def assign(left, right):
 #     if left.shape != right.shape:
@@ -227,11 +220,11 @@ def rope(x,cos,sin):
 
 # Feed forward
 class FeedForward(nn.Module):
-    def __init__(self,cfg):
+    def __init__(self,config:LLAMA32Config):
         super().__init__()
-        self.fc1 = nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], dtype=cfg["dtype"], bias=False)
-        self.fc2 = nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], dtype=cfg["dtype"], bias=False)
-        self.fc3 = nn.Linear(cfg["hidden_dim"],cfg["emb_dim"],dtype=cfg["dtype"],bias=False)
+        self.fc1 = nn.Linear(config.emb_dim, config.hidden_dim, dtype=config.dtype, bias=False)
+        self.fc2 = nn.Linear(config.emb_dim, config.hidden_dim, dtype=config.dtype, bias=False)
+        self.fc3 = nn.Linear(config.hidden_dim,config.emb_dim,dtype=config.dtype,bias=False)
     def forward(self,x):
         fc1 = self.fc1(x)
         fc2 = self.fc2(x)
@@ -241,24 +234,24 @@ class FeedForward(nn.Module):
     
 #Group Query attention with KV cache
 class GroupQueryAttention(nn.Module):
-    def __init__(self,d_out,num_heads,layer_idx,num_kv_groups,dtype=None):
+    def __init__(
+            self, d_in, d_out, num_heads, num_kv_groups, dtype=None
+    ):
         super().__init__()
-        assert d_out % num_heads == 0, "Dimension must be even"
-        assert num_heads % num_kv_groups == 0, "they must be equal"
+        assert d_out % num_heads == 0, "d_out must be divisible by num_heads"
+        assert num_heads % num_kv_groups == 0, "num_heads must be divisible by num_kv_groups"
 
         self.d_out = d_out
-        self.layer_idx = layer_idx
         self.num_heads = num_heads
-
         self.head_dim = d_out // num_heads
 
-        self.W_key = nn.Linear(d_out, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
-        self.W_value = nn.Linear(d_out, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
+        self.W_key = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
+        self.W_value = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
         self.num_kv_groups = num_kv_groups
         self.group_size = num_heads // num_kv_groups
 
-        self.W_query = nn.Linear(d_out, d_out, bias=False, dtype=dtype)
-        self.out_proj = nn.Linear(self.num_heads*d_out, d_out, bias=False, dtype=dtype)
+        self.W_query = nn.Linear(d_in, d_out, bias=False, dtype=dtype)
+        self.out_proj = nn.Linear(d_out, d_out, bias=False, dtype=dtype)
     def forward(self,x,cos,sin,mask,kv_cache=None):
         b,num_tokens,_ = x.shape
         query = self.W_query(x)
@@ -297,12 +290,12 @@ class GroupQueryAttention(nn.Module):
         return context_vector
 
 class TransformerBlock(nn.Module):
-    def __init__(self,cfg):
+    def __init__(self,config:LLAMA32Config):
         super().__init__()
-        self.att = GroupQueryAttention(d_in=cfg["emb_dim"],d_out=cfg["emb_dim"],num_heads=cfg["n_heads"],num_kv_groups=cfg["n_kv_groups"],dtype=cfg["dtype"])
-        self.norm1 = RMSNorm(cfg["emb_dim"]) 
-        self.norm2 = RMSNorm(cfg["emb_dim"])
-        self.ff = FeedForward(cfg)
+        self.att = GroupQueryAttention(d_in=config.emb_dim,d_out=config.emb_dim,num_heads=config.n_heads,num_kv_groups=config.n_kv_groups,dtype=config.dtype)
+        self.norm1 = RMSNorm(config.emb_dim) 
+        self.norm2 = RMSNorm(config.emb_dim)
+        self.ff = FeedForward(config)
     def forward(self, x, mask, cos, sin):
         shortcut = x
         x = self.norm1(x)
@@ -314,38 +307,37 @@ class TransformerBlock(nn.Module):
         x = x + shortcut
 
 class MultiModalProjector(nn.Module):
-    def __init__(self,config):
+    def __init__(self,config:LlamaVLMConfig):
         super().__init__()
-        self.config = config
-        self.linear = nn.Linear(config.vocab_size,config.hidden_size,config.padding_idx)
+        self.linear = nn.Linear(config.vision_config["hidden_size"],config.vision_config["  "])
     def forward(self,image_features):
         hidden_states = self.linear(image_features)
         return hidden_states
 
 class Llama3Model(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, config:LLAMA32Config):
         super().__init__()
 
         # Main model parameters
-        self.tok_emb = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"], dtype=cfg["dtype"])
+        self.tok_emb = nn.Embedding(config.vocab_size, config.emb_dim, dtype=config.dtype)
 
         self.trf_blocks = nn.ModuleList(  # ModuleList since Sequential can only accept one input, and we need `x, mask, cos, sin`
-            [TransformerBlock(cfg) for _ in range(cfg["n_layers"])]
+            [TransformerBlock(config) for _ in range(config.n_layers)]
         )
 
-        self.final_norm = RMSNorm(cfg["emb_dim"], eps=1e-5)
-        self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False, dtype=cfg["dtype"])
+        self.final_norm = RMSNorm(config.emb_dim, eps=1e-5)
+        self.out_head = nn.Linear(config.emb_dim, config.vocab_size, bias=False, dtype=config.dtype)
 
         # Reusuable utilities
         cos, sin = compute_rope_params(
-            head_dim=cfg["emb_dim"] // cfg["n_heads"],
-            theta_base=cfg["rope_base"],
-            context_length=cfg["context_length"],
-            freq_config=cfg["rope_freq"]
+            head_dim=config.emb_dim // config.n_heads,
+            theta_base=config.rope_base,
+            context_length=config.context_length,
+            freq_config=config.rope_freq
         )
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
-        self.cfg = cfg
+        self.cfg = config
 
     def get_input_embeeddings(self):
         return self.tok_emb
