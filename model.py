@@ -126,7 +126,7 @@ def generate(model, idx, max_new_tokens, context_size, temperature=1.0, top_k=No
 # def assign(left, right):
 #     if left.shape != right.shape:
 #         raise ValueError(f"Shape mismatch. Left: {left.shape}, Right: {right.shape}")
-#     return torch.nn.Parameter(torch.tensor(right))
+#     return torch.nn.Parameter(torch.tensor(right)
 
 
 #Add LoRA
@@ -241,24 +241,26 @@ class FeedForward(nn.Module):
     
 #Group Query attention with KV cache
 class GroupQueryAttention(nn.Module):
-    def __init__(self,d_in,d_out,num_heads,num_kv_groups,kv_cache = False,dtype=None):
+    def __init__(self,d_out,num_heads,layer_idx,num_kv_groups,dtype=None):
         super().__init__()
         assert d_out % num_heads == 0, "Dimension must be even"
         assert num_heads % num_kv_groups == 0, "they must be equal"
 
         self.d_out = d_out
+        self.layer_idx = layer_idx
         self.num_heads = num_heads
+
         self.head_dim = d_out // num_heads
 
-        self.W_key = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
-        self.W_value = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
+        self.W_key = nn.Linear(d_out, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
+        self.W_value = nn.Linear(d_out, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
         self.num_kv_groups = num_kv_groups
         self.group_size = num_heads // num_kv_groups
 
-        self.W_query = nn.Linear(d_in, d_out, bias=False, dtype=dtype)
-        self.out_proj = nn.Linear(d_out, d_out, bias=False, dtype=dtype)
-    def forward(self,x,cos,sin,mask):
-        b,num_tokens,d_in = x.shape
+        self.W_query = nn.Linear(d_out, d_out, bias=False, dtype=dtype)
+        self.out_proj = nn.Linear(self.num_heads*d_out, d_out, bias=False, dtype=dtype)
+    def forward(self,x,cos,sin,mask,kv_cache=None):
+        b,num_tokens,_ = x.shape
         query = self.W_query(x)
         key = self.W_key(x)
         value = self.W_value(x)
@@ -275,6 +277,9 @@ class GroupQueryAttention(nn.Module):
         #apply rope
         keys = rope(keys,cos,sin)
         queries= rope(queries,cos,sin)
+
+        if kv_cache is not None:
+            keys,queries = kv_cache.update(keys,queries,self.layer_idx)
 
         #expand to maximum length
         keys = repeat_kv(keys,self.group_size)
