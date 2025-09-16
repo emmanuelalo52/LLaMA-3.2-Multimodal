@@ -1,10 +1,17 @@
-from typing import Dict,List,Optional, Union,Tuple,Iterable
 import torch
 import numpy as np
 from PIL import Image
 
-IMAGENET_STANDARD_MEAN = [0.5, 0.5, 0.5]
-IMAGENET_STANDARD_STD = [0.5, 0.5, 0.5]
+IMAGENET_STANDARD_MEAN = [
+    0.48145466,
+    0.4578275,
+    0.40821073
+  ]
+IMAGENET_STANDARD_STD = [
+    0.26862954,
+    0.26130258,
+    0.27577711
+  ]
 
 def add_image_tokens_to_prompts(prefix_prompt,bos_token,image_seq_len,image_token):
     return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n"
@@ -35,7 +42,7 @@ def process_images(images,size=None,resample=None,rescale_factor=None,image_mean
     images = [image.transpose(2,0,1) for image in images]
     return images
 
-class paligemmaProcessor:
+class MllamaImageProcessor:
     def __init__(self,tokenizer,num_image_token,image_size):
         IMAGE_TOKEN = "<image>"
         super().__init__()
