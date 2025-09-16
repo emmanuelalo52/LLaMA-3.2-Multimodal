@@ -311,8 +311,8 @@ class Llama3Model(nn.Module):
             [TransformerBlock(config) for _ in range(config.n_layers)]
         )
 
-        self.final_norm = LLAMARMSNorm(config.emb_dim, eps=1e-5)
-        self.out_head = nn.Linear(config.emb_dim, config.vocab_size, bias=False, dtype=config.dtype)
+        self.final_norm = LLAMARMSNorm(config.hidden_size, eps=1e-5)
+        self.out_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False, dtype=config.dtype)
 
         # Reusuable utilities
         cos, sin = compute_rope_params(
