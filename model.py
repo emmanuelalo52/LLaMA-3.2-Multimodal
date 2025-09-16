@@ -112,64 +112,6 @@ def repeat_kv(hidden_states, n_rep):
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
-
-class Tokenizer:
-    """Thin wrapper around tiktoken that keeps track of Llama-3 special IDs."""
-    def __init__(self, model_path):
-        if not os.path.isfile(model_path):
-            raise FileNotFoundError(model_path)
-
-        mergeable = load_tiktoken_bpe(model_path)
-
-        # hard-coded from Meta's tokenizer.json
-        self.special = {
-            "<|begin_of_text|>": 128000,
-            "<|end_of_text|>": 128001,
-            "<|start_header_id|>": 128006,
-            "<|end_header_id|>": 128007,
-            "<|eot_id|>": 128009,
-        }
-        self.special.update({f"<|reserved_{i}|>": 128002 + i
-                             for i in range(256)
-                             if 128002 + i not in self.special.values()})
-
-        self.model = tiktoken.Encoding(
-            name=Path(model_path).name,
-            pat_str=r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
-                    r"|[^\r\n\p{L}\p{N}]?\p{L}+"
-                    r"|\p{N}{1,3}"
-                    r"| ?[^\s\p{L}\p{N}]+[\r\n]*"
-                    r"|\s*[\r\n]+"
-                    r"|\s+(?!\S)"
-                    r"|\s+",
-            mergeable_ranks=mergeable,
-            special_tokens=self.special,
-        )
-
-    def encode(self, text, bos=False, eos=False):
-        ids = ([self.special["<|begin_of_text|>"]] if bos else []) \
-              + self.model.encode(text)
-        if eos:
-            ids.append(self.special["<|end_of_text|>"])
-        return ids
-
-    def decode(self, ids):
-        return self.model.decode(ids)
-def text_to_tokens(text, tokenizer):
-    encoded = tokenizer.encode(text, allowed_special={'<|endoftext|>'})
-    return torch.tensor(encoded).unsqueeze(0)
-
-def token_to_text(token_ids, tokenizer):
-    flat = token_ids.squeeze(0)
-    return tokenizer.decode(flat.tolist())
-
-# def assign(left, right):
-#     if left.shape != right.shape:
-#         raise ValueError(f"Shape mismatch. Left: {left.shape}, Right: {right.shape}")
-#     return torch.nn.Parameter(torch.tensor(right)
-
-
-
     
 #RMSNorm
 class RMSNorm(nn.Module):
@@ -259,15 +201,18 @@ class FeedForward(nn.Module):
 #Group Query attention with KV cache
 class GroupQueryAttention(nn.Module):
     def __init__(
-            self, d_in, d_out, num_heads, num_kv_groups, dtype=None
+            self,layer_idx, d_in, d_out, num_heads, num_kv_groups, dtype=None
     ):
         super().__init__()
         assert d_out % num_heads == 0, "d_out must be divisible by num_heads"
         assert num_heads % num_kv_groups == 0, "num_heads must be divisible by num_kv_groups"
 
+        self.layer_idx = layer_idx
+
         self.d_out = d_out
         self.num_heads = num_heads
         self.head_dim = d_out // num_heads
+        
 
         self.W_key = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
         self.W_value = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
@@ -383,125 +328,3 @@ class Llama3Model(nn.Module):
 
 class MllamaForConditionalGeneration(nn.Module):
     def __init__(self)
-# #Load Pretrained weights
-# def assign(left, right, tensor_name="unknown"):
-#     if left.shape != right.shape:
-#         raise ValueError(f"Shape mismatch in tensor '{tensor_name}'. Left: {left.shape}, Right: {right.shape}")
-
-#     if isinstance(right, torch.Tensor):
-#         return torch.nn.Parameter(right.clone().detach())
-#     else:
-#         return torch.nn.Parameter(torch.tensor(right))
-
-
-# def load_weights_into_llama(model, param_config, params):
-#     model.tok_emb.weight = assign(model.tok_emb.weight, params["model.embed_tokens.weight"], "model.embed_tokens.weight")
-
-#     for l in range(param_config["n_layers"]):
-
-#         # Load attention weights
-#         model.trf_blocks[l].att.W_query.weight = assign(
-#             model.trf_blocks[l].att.W_query.weight,
-#             params[f"model.layers.{l}.self_attn.q_proj.weight"],
-#             f"model.layers.{l}.self_attn.q_proj.weight"
-#         )
-#         model.trf_blocks[l].att.W_key.weight = assign(
-#             model.trf_blocks[l].att.W_key.weight,
-#             params[f"model.layers.{l}.self_attn.k_proj.weight"],
-#             f"model.layers.{l}.self_attn.k_proj.weight"
-#         )
-#         model.trf_blocks[l].att.W_value.weight = assign(
-#             model.trf_blocks[l].att.W_value.weight,
-#             params[f"model.layers.{l}.self_attn.v_proj.weight"],
-#             f"model.layers.{l}.self_attn.v_proj.weight"
-#         )
-#         model.trf_blocks[l].att.out_proj.weight = assign(
-#             model.trf_blocks[l].att.out_proj.weight,
-#             params[f"model.layers.{l}.self_attn.o_proj.weight"],
-#             f"model.layers.{l}.self_attn.o_proj.weight"
-#         )
-#         model.trf_blocks[l].norm1.weight = assign(
-#             model.trf_blocks[l].norm1.weight,
-#             params[f"model.layers.{l}.input_layernorm.weight"],
-#             f"model.layers.{l}.input_layernorm.weight"
-#         )
-
-#         # Load FeedForward weights
-#         model.trf_blocks[l].ff.fc1.weight = assign(
-#             model.trf_blocks[l].ff.fc1.weight,
-#             params[f"model.layers.{l}.mlp.gate_proj.weight"],
-#             f"model.layers.{l}.mlp.gate_proj.weight"
-#         )
-#         model.trf_blocks[l].ff.fc2.weight = assign(
-#             model.trf_blocks[l].ff.fc2.weight,
-#             params[f"model.layers.{l}.mlp.up_proj.weight"],
-#             f"model.layers.{l}.mlp.up_proj.weight"
-#         )
-#         model.trf_blocks[l].ff.fc3.weight = assign(
-#             model.trf_blocks[l].ff.fc3.weight,
-#             params[f"model.layers.{l}.mlp.down_proj.weight"],
-#             f"model.layers.{l}.mlp.down_proj.weight"
-#         )
-#         model.trf_blocks[l].norm2.weight = assign(
-#             model.trf_blocks[l].norm2.weight,
-#             params[f"model.layers.{l}.post_attention_layernorm.weight"],
-#             f"model.layers.{l}.post_attention_layernorm.weight"
-#         )
-
-    # # Load output layer weights
-    # model.final_norm.weight = assign(model.final_norm.weight, params["model.norm.weight"], "model.norm.weight")
-
-    # if "lm_head.weight" in params.keys():
-    #     model.out_head.weight = assign(model.out_head.weight, params["lm_head.weight"], "lm_head.weight")
-    # else:
-    #     model.out_head.weight = assign(model.out_head.weight, params["model.embed_tokens.weight"], "model.embed_tokens.weight")
-    #     print("Model uses weight tying.")
-
-
-#-----------------------------------------------------------------------------------Training---------------------------------------------------------------------------------------- 
-# if __name__ == "__main__":
-#     # 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
-#     from huggingface_hub import hf_hub_download, login
-
-#     # Optional: Use this for non-interactive login
-#     # login(token="your_huggingface_access_token")
-
-#     # Define model size string
-#     LLAMA_SIZE_STR = "1B"  # e.g. "8B", "70B", etc.
-
-#     # Login interactively (only if you're running the script manually)
-#     login()
-
-#     # Download tokenizer
-#     tokenizer_file_path = hf_hub_download(
-#         repo_id=f"meta-llama/Llama-3.2-{LLAMA_SIZE_STR}",
-#         filename="original/tokenizer.model",
-#         local_dir=f"Llama-3.2-{LLAMA_SIZE_STR}"
-#     )
-#     tokenizer = Tokenizer(tokenizer_file_path)
-#     if LLAMA_SIZE_STR == "1B":
-#         weights_file = hf_hub_download(
-#             repo_id=f"meta-llama/Llama-3.2-{LLAMA_SIZE_STR}",
-#             filename="model.safetensors",
-#             local_dir=f"Llama-3.2-{LLAMA_SIZE_STR}"
-#         )
-#         combined_weights = load_file(weights_file)
-
-
-#     else:
-#         combined_weights = {}
-#         for i in range(1, 3):
-#             weights_file = hf_hub_download(
-#                 repo_id=f"meta-llama/Llama-3.2-{LLAMA_SIZE_STR}",
-#                 filename=f"model-0000{i}-of-00002.safetensors",
-#                 local_dir=f"Llama-3.2-{LLAMA_SIZE_STR}"
-#             )
-#             current_weights = load_file(weights_file)
-#             combined_weights.update(current_weights)
-
-
-#     model = Llama3Model(LLAMA32_CONFIG)
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
-
-
-#     model.to(device)
