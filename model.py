@@ -13,26 +13,28 @@ from siglip import SiglipVisionConfig,SiglipModel
 class LLAMA32Config():
     def __init__(self,
                  vocab_size,
-                 emb_dim,
+                 hidden_size=4096,
                  context_length=131072,
                  n_heads=32,
                  n_layers=16,
-                 hidden_dim=8192,
+                 hidden_dim=8192, # Also called intermediate size
                  n_kv_groups=8,
                  rope_base=500000.0,
+                 rms_norm_eps=1e-05,
                  dtype=torch.bfloat16,
                  rope_freq=None,
                  pad_token_index=None,
                  **kwargs,):
         super().__init__()
         self.vocab_size = vocab_size # Vocabulary size
-        self.emb_dim = emb_dim # Embedding dimension
+        self.hidden_size = hidden_size # Hidden size
         self.context_length = context_length # Context length that was used to train the model
         self.n_heads = n_heads # Number of attention heads
         self.n_layers = n_layers # Number of layers
         self.hidden_dim = hidden_dim # Size of the intermediate dimension in FeedForward
         self.n_kv_groups = n_kv_groups # Key-Value groups for grouped-query attention
         self.rope_base = rope_base # The base in RoPE's "theta"
+        self.rms_norm_eps = rms_norm_eps
         self.dtype = dtype # Lower-precision dtype to reduce memory usage. For lower GPUs use 'torch.float16'
         self.rope_freq = rope_freq if rope_freq is not None else { # RoPE frequency scaling
             "factor": 32.0,
@@ -51,7 +53,8 @@ class MLLAMAConfig():
                  vocab_size=128256,
                  projection_dim=2048,
                  hidden_size=2048,
-                 pad_token_index=None
+                 pad_token_index=None,
+                 **kwargs,
                  ):
         super().__init__()
         self.ignore_index = ignore_index
@@ -114,75 +117,72 @@ def repeat_kv(hidden_states, n_rep):
 
     
 #RMSNorm
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-6):
+class LLAMARMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        # The gamma parameter
-        self.weight = nn.Parameter(torch.ones(dim))
+        self.weight = nn.Parameter(torch.zeros(dim))
 
-    def _norm(self, x: torch.Tensor):
-        # (B, Seq_Len, Dim) * (B, Seq_Len, 1) = (B, Seq_Len, Dim)
-        # rsqrt: 1 / sqrt(x)
+    def _norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
-    def forward(self, x: torch.Tensor):
-        # (Dim) * (B, Seq_Len, Dim) = (B, Seq_Len, Dim)
-        return self.weight * self._norm(x.float()).type_as(x)
-    
+    def forward(self, x):
+        output = self._norm(x.float())
+        # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
+        # See https://github.com/huggingface/transformers/pull/29402
+        output = output * (1.0 + self.weight.float())
+        return output.type_as(x)
 
-#Rotary Postional Embedding 
-def compute_rope_params(head_dim,theta_base=10_000,context_length=4096,freq_config=None,dtype=torch.float32,position_ids=None):
-    assert head_dim % 2 == 0, "embedding dimension must be even"
-    #inverse frequency
-    inv_freq = 1.0/(theta_base **(torch.arange(0,head_dim,2,dtype=dtype)[: (head_dim//2)].float()/head_dim))
-    # Frequency adjustments
-    if freq_config is not None:
-        low_freq_wavelen = freq_config["original_context_length"] / freq_config["low_freq_factor"]
-        high_freq_wavelen = freq_config["original_context_length"] / freq_config["high_freq_factor"]
+class LLAMARotaryEmbedding(nn.Module):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
+        super().__init__()
 
-        wavelen = 2 * torch.pi / inv_freq
+        self.dim = dim # it is set to the head_dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
 
-        inv_freq_llama = torch.where(
-            wavelen > low_freq_wavelen, inv_freq / freq_config["factor"], inv_freq
-        )
+        # Calculate the theta according to the formula theta_i = base^(-2i/dim) where i = 0, 1, 2, ..., dim // 2
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float() / self.dim))
+        self.register_buffer("inv_freq", tensor=inv_freq, persistent=False)
 
-        smooth_factor = (freq_config["original_context_length"] / wavelen - freq_config["low_freq_factor"]) / (
-            freq_config["high_freq_factor"] - freq_config["low_freq_factor"]
-        )
+    @torch.no_grad()
+    def forward(self, x, position_ids, seq_len=None):
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        self.inv_freq.to(x.device)
+        # Copy the inv_freq tensor for batch in the sequence
+        # inv_freq_expanded: [Batch_Size, Head_Dim // 2, 1]
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        # position_ids_expanded: [Batch_Size, 1, Seq_Len]
+        position_ids_expanded = position_ids[:, None, :].float()
+        device_type = x.device.type
+        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            # Multiply each theta by the position (which is the argument of the sin and cos functions)
+            # freqs: [Batch_Size, Head_Dim // 2, 1] @ [Batch_Size, 1, Seq_Len] --> [Batch_Size, Seq_Len, Head_Dim // 2]
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            # emb: [Batch_Size, Seq_Len, Head_Dim]
+            emb = torch.cat((freqs, freqs), dim=-1)
+            # cos, sin: [Batch_Size, Seq_Len, Head_Dim]
+            cos = emb.cos()
+            sin = emb.sin()
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
-        smoothed_inv_freq = (
-            (1 - smooth_factor) * (inv_freq / freq_config["factor"]) + smooth_factor * inv_freq
-        )
 
-        is_medium_freq = (wavelen <= low_freq_wavelen) & (wavelen >= high_freq_wavelen)
-        inv_freq_llama = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
-        inv_freq = inv_freq_llama
-    #positons
-    if position_ids is None:
-        postion_ids = torch.arange(context_length,dtype=dtype)
-    #angles
-    angles = postion_ids[:,None] * inv_freq[None,:]
-    #expand angles to match head_dim
-    angles = torch.cat([angles,angles],dim=1)
-    #sin and cos
-    sin = torch.sin(angles)
-    cos = torch.cos(angles)
-    return cos, sin
+def rotate_half(x):
+    # Build the [-x2, x1, -x4, x3, ...] tensor for the sin part of the positional encoding.
+    x1 = x[..., : x.shape[-1] // 2] # Takes the first half of the last dimension
+    x2 = x[..., x.shape[-1] // 2 :] # Takes the second half of the last dimension
+    return torch.cat((-x2, x1), dim=-1)
 
-#compute 2d RoPE
-def rope(x,cos,sin):
-    batch_size, num_heads, seq_len, head_dim = x.shape
-    #d must be even
-    head_dim % 2 == 0, "dimension must be even"
-    x1 = x[...,:head_dim//2]
-    x2 = x[...,head_dim//2:]
-    cos = cos[:seq_len,:].unsqueeze(0).unsqueeze(0)
-    sin = sin[:seq_len,:].unsqueeze(0).unsqueeze(0)
 
-    rotated = torch.cat((-x2,x1),dim=-1)
-    x_rotated = (x*cos) + (rotated * sin)
-    return x_rotated.to(dtype=x.dtype)
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
+    cos = cos.unsqueeze(unsqueeze_dim) # Add the head dimension
+    sin = sin.unsqueeze(unsqueeze_dim) # Add the head dimension
+    # Apply the formula (34) of the Rotary Positional Encoding paper.
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
 
 # Feed forward
 class FeedForward(nn.Module):
@@ -201,31 +201,34 @@ class FeedForward(nn.Module):
 #Group Query attention with KV cache
 class GroupQueryAttention(nn.Module):
     def __init__(
-            self,layer_idx, d_in, d_out, num_heads, num_kv_groups, dtype=None
+            self,config:LLAMA32Config,layer_idx=None,dtype=None
     ):
         super().__init__()
-        assert d_out % num_heads == 0, "d_out must be divisible by num_heads"
-        assert num_heads % num_kv_groups == 0, "num_heads must be divisible by num_kv_groups"
+        assert config.hidden_size % config.n_heads == 0, "d_out must be divisible by num_heads"
+        assert config.n_heads % config.n_kv_groups == 0, "num_heads must be divisible by num_kv_groups"
 
+        self.config = config
         self.layer_idx = layer_idx
 
-        self.d_out = d_out
-        self.num_heads = num_heads
-        self.head_dim = d_out // num_heads
+        self.num_heads = config.n_heads
+        self.head_dim = config.hidden_size // config.n_heads
         
+        self.is_causal = True
 
-        self.W_key = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
-        self.W_value = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False, dtype=dtype)
-        self.num_kv_groups = num_kv_groups
-        self.group_size = num_heads // num_kv_groups
+        self.W_key = nn.Linear(config.hidden_size, config.n_kv_groups * self.head_dim, bias=False, dtype=dtype)
+        self.W_value = nn.Linear(config.hidden_size, config.n_kv_groups * self.head_dim, bias=False, dtype=dtype)
+        self.num_kv_groups = config.n_kv_groups
+        self.group_size = config.n_heads // config.n_kv_groups
 
-        self.W_query = nn.Linear(d_in, d_out, bias=False, dtype=dtype)
-        self.out_proj = nn.Linear(d_out, d_out, bias=False, dtype=dtype)
-    def forward(self,x,cos,sin,mask,kv_cache=None):
-        b,num_tokens,_ = x.shape
-        query = self.W_query(x)
-        key = self.W_key(x)
-        value = self.W_value(x)
+        self.W_query = nn.Linear(config.hidden_size, config.n_heads * self.head_dim, bias=False, dtype=dtype)
+        self.out_proj = nn.Linear(config.n_heads * self.head_dim, config.hidden_size, bias=False, dtype=dtype)
+        self.rotary_emb = LLAMARotaryEmbedding(dim=self.head_dim,max_position_embeddings=self.max_position_embeddings,base=self.rope_theta,)
+
+    def forward(self,hidden_states,attention_mask=None,position_ids=None,kv_cache=None):
+        b,num_tokens,_ = hidden_states.shape
+        query = self.W_query(hidden_states)
+        key = self.W_key(hidden_states)
+        value = self.W_value(hidden_states)
 
         query = query.view(b,num_tokens,self.num_heads,self.head_dim)
         key = key.view(b,num_tokens,self.num_kv_groups,self.head_dim)
@@ -237,8 +240,8 @@ class GroupQueryAttention(nn.Module):
         keys = key.transpose(1,2)
 
         #apply rope
-        keys = rope(keys,cos,sin)
-        queries= rope(queries,cos,sin)
+        cos,sin = self.rotary_emb(values,position_ids,seq_len=None)
+        queries,keys = apply_rotary_pos_emb(queries,keys,cos,sin)
 
         if kv_cache is not None:
             keys,queries = kv_cache.update(keys,queries,self.layer_idx)
@@ -250,7 +253,13 @@ class GroupQueryAttention(nn.Module):
         #attention score
         attn_score = queries @ keys.transpose(2,3)
         # mask = self.mask[:num_tokens,:num_tokens].bool()
-        attn_score = attn_score.masked_fill(mask,float("-inf"))
+        if attention_mask is not None:
+
+            # Crop Attetion Mask to only include upto the number of key/value tokens we have to attend to 
+            causal_mask = attention_mask[:, :, :, :keys.shape[-2]]
+
+            # Add Causal Mask to score
+            attn_score = attn_score + causal_mask
         
         attn_weight = torch.softmax(attn_score/(keys.shape[-1]**0.5),dim=-1)
         context_vector = (attn_weight @ values).transpose(1,2)
@@ -259,21 +268,29 @@ class GroupQueryAttention(nn.Module):
         return context_vector
 
 class TransformerBlock(nn.Module):
-    def __init__(self,config:LLAMA32Config):
+    def __init__(self,config:LLAMA32Config,layer_idx):
         super().__init__()
-        self.att = GroupQueryAttention(d_in=config.emb_dim,d_out=config.emb_dim,num_heads=config.n_heads,num_kv_groups=config.n_kv_groups,dtype=config.dtype)
-        self.norm1 = RMSNorm(config.emb_dim) 
-        self.norm2 = RMSNorm(config.emb_dim)
+        self.config= config
+        self.att = GroupQueryAttention(config,layer_idx=layer_idx,dtype=config.dtype)
+        self.norm1 = LLAMARMSNorm(dim=config.hidden_size,eps=config.rms_norm_eps) 
+        self.norm2 = LLAMARMSNorm(dim=config.hidden_size,eps=config.rms_norm_eps)
         self.ff = FeedForward(config)
-    def forward(self, x, mask, cos, sin):
-        shortcut = x
-        x = self.norm1(x)
-        x = self.att(x, cos, sin, mask)
-        x = x + shortcut
+    def forward(self,hidden_states,attention_mask=None,position_ids=None,kv_cache=None,):
+        residual = hidden_states
 
-        x = self.norm2(x)
-        x = self.ff(x)
-        x = x + shortcut
+        hidden_states = self.norm1(hidden_states)
+        hidden_states,_, = self.att(hidden_states=hidden_states,attention_mask=attention_mask,position_ids=position_ids,kv_cache=kv_cache,)
+
+        hidden_states = residual+ hidden_states
+        residual = hidden_states
+
+        hidden_states = self.norm2(hidden_states)
+        hidden_states = self.ff(hidden_states)
+
+        hidden_states = residual + hidden_states
+
+        return hidden_states
+
 
 class MultiModalProjector(nn.Module):
     def __init__(self,config:MLLAMAConfig):
@@ -294,7 +311,7 @@ class Llama3Model(nn.Module):
             [TransformerBlock(config) for _ in range(config.n_layers)]
         )
 
-        self.final_norm = RMSNorm(config.emb_dim, eps=1e-5)
+        self.final_norm = LLAMARMSNorm(config.emb_dim, eps=1e-5)
         self.out_head = nn.Linear(config.emb_dim, config.vocab_size, bias=False, dtype=config.dtype)
 
         # Reusuable utilities
