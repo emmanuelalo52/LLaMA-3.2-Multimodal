@@ -153,7 +153,7 @@ The Siglip components implement a small patch-based vision transformer. Below ar
 - `SiglipModel` is a tiny wrapper that instantiates the transformer and provides a `forward(pixel_values)` that returns the transformer outputs.
 
 ---
-## API reference — language & multimodal model (`model.py`) fileciteturn0file0
+## API reference — language & multimodal model (`model.py`)
 
 `model.py` contains a Llama-style autoregressive model implementation, rotary embeddings, grouped-query attention (GQA), and the multimodal wrapper.
 
@@ -209,7 +209,7 @@ Main components documented here (shortened names):
 **Important**: The current `forward()` uses a simple cross-entropy on shifted tokens when `labels` are given. There are helper functions `_compute_loss_with_masking` and `_create_conversation_mask` that provide masked loss semantics for VLM training — consider enabling them during multi-modal fine-tuning to avoid penalizing image tokens or system prompt tokens.
 
 ---
-## Image processing (`processing_mllama.py`) fileciteturn0file1
+## Image processing (`processing_mllama.py`)
 
 This module contains helper functions to preprocess images for the Siglip vision model and the `MllamaImageProcessor` class which prepares both the pixel tensors and the tokenized text inputs.
 
@@ -223,87 +223,6 @@ Key functions & their behavior:
 **Important notes / pitfalls (see bug fixes below)**:
 - The code uses `self.IMAGE_TOKEN` before setting it as `self.IMAGE_TOKEN` — this will raise a `NameError` or unexpected behavior. Also the `tokens_to_add` dictionary key should be `'additional_special_tokens'` (with underscores) when calling a HF tokenizer `add_special_tokens` method — the code uses `'additional_special tokens'` which is incorrect.
 - The method returns `{"pixel Value": pixel_values, **inputs}` — the key name has a space and capital V; standard is `pixel_values`. This mismatch will cause accidental bugs when passing the returned dict into `MllamaForConditionalGeneration` which expects `pixel_values=` keyword.
-
----
-## Common issues, bugs found & suggested fixes (must-read)
-
-I read the code carefully and found multiple likely runtime issues. I recommend applying the following patches/fixes **before** training or running end-to-end experiments.
-
-> Where I reference files, those files are the ones you uploaded. Apply the edits directly in your local copy.
-
-### 1) `Conv2d(..., padding="valid")` — PyTorch `Conv2d` padding argument is invalid
-**Problem:** In `SiglipVisionEmbedding.__init__`, the `nn.Conv2d(..., padding="valid")` is invalid for PyTorch (that's a TensorFlow-style string). This will raise `TypeError`.
-**Fix:** replace with `padding=0` (or `padding='same'` only if using PyTorch >= 2.0 `padding='same'` behavior is acceptable).
-```py
-# Replace in SiglipVisionEmbedding.__init__:
-self.patch_embedding = nn.Conv2d(..., kernel_size=self.patch_size, stride=self.patch_size, padding=0)
-```
-
-### 2) `SiglipVisionTransformer` calls encoder with wrong kwarg name
-**Problem:** `self.encoder(input=hidden_states)` where `SiglipEncoder.forward` expects `inputs_embeds` (or positional arg). This mismatch leads to `TypeError: forward() got an unexpected keyword argument 'input'`.
-**Fix:** either call `self.encoder(hidden_states)` or `self.encoder(inputs_embeds=hidden_states)`:
-```py
-# change
-last_hidden_state = self.encoder(inputs_embeds=hidden_states)
-# or
-last_hidden_state = self.encoder(hidden_states)
-```
-
-### 3) Attention scale is inverted (multiplied instead of divided)
-**Problem:** `self.scale = self.head_dim ** 0.5` and later `attention_weights = (Q @ K^T) * self.scale`. Correct scaled dot-product attention uses division by sqrt(head_dim).
-**Fix:** set `self.scale = self.head_dim ** 0.5` but use `/ self.scale` OR set `self.scale = 1.0 / math.sqrt(self.head_dim)` and multiply.
-```py
-# Option 1
-self.scale = self.head_dim ** 0.5
-attention_weights = torch.matmul(query_state, keys_state.transpose(2,3)) / self.scale
-
-# Option 2 (clearer)
-self.scale = 1.0 / (self.head_dim ** 0.5)
-attention_weights = torch.matmul(query_state, keys_state.transpose(2,3)) * self.scale
-```
-
-### 4) `patch_embedding` & `position_embedding` broadcasting: position ids correct but be explicit
-**Suggestion:** ensure `position_ids` is `torch.arange(self.num_positions, dtype=torch.long)` and register as shape `(self.num_positions,)` and in forward call `self.position_embedding(torch.arange(self.num_positions, device=embeddings.device))` or keep current approach but ensure dtype long. The current code usually works but keep an eye on dtype/device mismatch when adding embeddings — move pos emb to same device as inputs before adding.
-
-### 5) `SiglipVisionEmbedding.position_ids` registered with `persistent=False`
-That's OK (will not be saved in state_dict) but if you want to save position ids into state_dict (rare need) set `persistent=True`. Not a bug, just a note.
-
-### 6) `SiglipMLP` uses `nn.functional.gelu(..., approximate="tanh")`
-- Confirm PyTorch version supports the `approximate` keyword; some versions may not. Safe alternative:
-```py
-hidden_state = torch.nn.functional.gelu(hidden_state)
-```
-
-### 7) `TransformerBlock` and `GroupQueryAttention` return mismatches in `model.py`
-**Problem:** `TransformerBlock.forward` expects `self.att(...)` to return a tuple (`hidden_states, something`) but `GroupQueryAttention.forward` returns a single tensor `context_vector`. The code in `model.py` attempts to unpack more values than returned.
-**Fix:** either change `GroupQueryAttention` to return `(context_vector, attn_weights)` or stop unpacking:
-```py
-# simpler fix in TransformerBlock.forward
-hidden_states = self.att(hidden_states=hidden_states, attention_mask=attention_mask, position_ids=position_ids, kv_cache=kv_cache)
-# ... continue
-```
-
-### 8) `MllamaImageProcessor` — many tokenizer API issues
-- `IMAGE_TOKEN` declared as a local variable but `tokens_to_add` uses `self.IMAGE_TOKEN` — leads to `AttributeError`. Use `self.IMAGE_TOKEN = IMAGE_TOKEN` before using.
-- The dict key must be `'additional_special_tokens'` (underscore). The code uses `'additional_special tokens'`. Fix:
-```py
-self.IMAGE_TOKEN = "<image>"
-tokens_to_add = {"additional_special_tokens": [self.IMAGE_TOKEN]}
-tokenizer.add_special_tokens(tokens_to_add)
-```
-- `tokenizer.add_bos_token = False` is not how HF tokenizers typically toggle BOS/EOS. Use `tokenizer.bos_token = None` or adjust usage depending on tokenizer class. Verify your tokenizer API.
-- Return key is `"pixel Value"` (space & capital V) — use `"pixel_values"` for consistent naming:
-```py
-return_data = {"pixel_values": pixel_values, **inputs}
-```
-
-### 9) `LLAMA32Config` typos & dtype defaults
-- `self.max_positio_embeddings` has a typo (missing `n`). Should be `self.max_position_embeddings`.
-- `dtype=torch.bfloat16` might be undesirable for most GPUs. Consider `torch.float16` for CUDA/consumer GPUs.
-- `head_dim` exists as param and code sometimes uses `config.head_dim` vs `config.hidden_size // config.n_heads`. Ensure both match.
-
-### 10) Attention scaling & RoPE numeric stability
-- The rotary embedding code uses `.to(dtype=x.dtype)` conversions; ensure `position_ids` is on same device and the `inv_freq` buffer is moved to device before use. The code does `self.inv_freq.to(x.device)` but that returns a tensor without reassigning; prefer `self.inv_freq = self.inv_freq.to(x.device)` or just do `inv_freq = self.inv_freq.to(x.device)` inside forward.
 
 ---
 ## Testing, debugging & utilities
