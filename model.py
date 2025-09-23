@@ -14,10 +14,12 @@ class LLAMA32Config():
     def __init__(self,
                  vocab_size,
                  hidden_size=4096,
+                 head_dim = 128,
                  context_length=131072,
                  n_heads=32,
                  n_layers=16,
                  hidden_dim=8192, # Also called intermediate size
+                 max_position_embeddings=2048,
                  n_kv_groups=8,
                  rope_base=500000.0,
                  rms_norm_eps=1e-05,
@@ -26,8 +28,10 @@ class LLAMA32Config():
                  pad_token_index=None,
                  **kwargs,):
         super().__init__()
+        self.head_dim = head_dim
         self.vocab_size = vocab_size # Vocabulary size
         self.hidden_size = hidden_size # Hidden size
+        self.max_positio_embeddings = max_position_embeddings
         self.context_length = context_length # Context length that was used to train the model
         self.n_heads = n_heads # Number of attention heads
         self.n_layers = n_layers # Number of layers
@@ -134,12 +138,12 @@ class LLAMARMSNorm(nn.Module):
         return output.type_as(x)
 
 class LLAMARotaryEmbedding(nn.Module):
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
+    def __init__(self,config:LLAMA32Config, device=None):
         super().__init__()
 
-        self.dim = dim # it is set to the head_dim
-        self.max_position_embeddings = max_position_embeddings
-        self.base = base
+        self.dim = config.hidden_size // config.n_heads # it is set to the head_dim
+        self.max_position_embeddings = config.max_position_embeddings
+        self.base = config.rope_base
 
         # Calculate the theta according to the formula theta_i = base^(-2i/dim) where i = 0, 1, 2, ..., dim // 2
         inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float() / self.dim))
@@ -213,7 +217,6 @@ class GroupQueryAttention(nn.Module):
         self.num_heads = config.n_heads
         self.head_dim = config.hidden_size // config.n_heads
         
-        self.is_causal = True
 
         self.W_key = nn.Linear(config.hidden_size, config.n_kv_groups * self.head_dim, bias=False, dtype=dtype)
         self.W_value = nn.Linear(config.hidden_size, config.n_kv_groups * self.head_dim, bias=False, dtype=dtype)
@@ -223,6 +226,8 @@ class GroupQueryAttention(nn.Module):
         self.W_query = nn.Linear(config.hidden_size, config.n_heads * self.head_dim, bias=False, dtype=dtype)
         self.out_proj = nn.Linear(config.n_heads * self.head_dim, config.hidden_size, bias=False, dtype=dtype)
         self.rotary_emb = LLAMARotaryEmbedding(dim=self.head_dim,max_position_embeddings=self.max_position_embeddings,base=self.rope_theta,)
+
+        self.is_causal = True
 
     def forward(self,hidden_states,attention_mask=None,position_ids=None,kv_cache=None):
         b,num_tokens,_ = hidden_states.shape
@@ -305,7 +310,9 @@ class Llama3Model(nn.Module):
         super().__init__()
 
         # Main model parameters
-        self.tok_emb = nn.Embedding(config.vocab_size, config.emb_dim, dtype=config.dtype)
+        self.config = config
+        self.pad_token_id  = config.pad_token_index
+        self.tok_emb = nn.Embedding(config.vocab_size, config.hidden_size,self.pad_token_id, dtype=config.dtype)
 
         self.trf_blocks = nn.ModuleList(  # ModuleList since Sequential can only accept one input, and we need `x, mask, cos, sin`
             [TransformerBlock(config) for _ in range(config.n_layers)]
@@ -315,32 +322,29 @@ class Llama3Model(nn.Module):
         self.out_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False, dtype=config.dtype)
 
         # Reusuable utilities
-        cos, sin = compute_rope_params(
-            head_dim=config.emb_dim // config.n_heads,
-            theta_base=config.rope_base,
-            context_length=config.context_length,
-            freq_config=config.rope_freq
-        )
-        self.register_buffer("cos", cos, persistent=False)
-        self.register_buffer("sin", sin, persistent=False)
-        self.cfg = config
+        self.rotary_emb = LLAMARotaryEmbedding(config)
 
     def get_input_embeeddings(self):
         return self.tok_emb
 
-    def forward(self, in_idx,kv_cache,input_embeds):
+    def forward(self,attention_mask=None,positon_ids=None,input_embeds=None,kv_cache=None,):
         # Forward pass
-        tok_embeds = self.tok_emb(in_idx)
-        x = tok_embeds
+        hidden_state = self.tok_emb()
+        normalizer = torch.tensor(self.config.hidden_size**0.5,dtype=hidden_state.dtype)
 
-        num_tokens = x.shape[1]
-        mask = torch.triu(torch.ones(num_tokens, num_tokens, device=x.device, dtype=torch.bool), diagonal=1)
-        
+        hidden_state = hidden_state * normalizer
+
+
+               
         for block in self.trf_blocks:
-            x = block(x, mask, self.cos, self.sin)
-        x = self.final_norm(x)
-        logits = self.out_head(x.to(self.cfg["dtype"]))
-        return logits
+            hidden_state = block(hidden_state,
+                                 attention_mask=attention_mask,
+                                 positon_ids=positon_ids,
+                                 input_embeds=input_embeds,
+                                 kv_cache=kv_cache,
+                                 )
+        hidden_state = self.final_norm(hidden_state)
+        return hidden_state
 
 
 class MllamaForConditionalGeneration(nn.Module):
