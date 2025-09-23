@@ -43,8 +43,8 @@ def process_images(images,size=None,resample=None,rescale_factor=None,image_mean
     return images
 
 class MllamaImageProcessor:
+    IMAGE_TOKEN = "<image>"
     def __init__(self,tokenizer,num_image_token,image_size):
-        IMAGE_TOKEN = "<image>"
         super().__init__()
         self.image_seq_length = num_image_token
         self.image_size = image_size

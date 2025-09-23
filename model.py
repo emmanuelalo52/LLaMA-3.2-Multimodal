@@ -14,7 +14,6 @@ class LLAMA32Config():
     def __init__(self,
                  vocab_size,
                  hidden_size=4096,
-                 head_dim = 128,
                  context_length=131072,
                  n_heads=32,
                  n_layers=16,
@@ -23,15 +22,14 @@ class LLAMA32Config():
                  n_kv_groups=8,
                  rope_base=500000.0,
                  rms_norm_eps=1e-05,
-                 dtype=torch.bfloat16,
+                 dtype=torch.float16,
                  rope_freq=None,
                  pad_token_index=None,
                  **kwargs,):
         super().__init__()
-        self.head_dim = head_dim
         self.vocab_size = vocab_size # Vocabulary size
         self.hidden_size = hidden_size # Hidden size
-        self.max_positio_embeddings = max_position_embeddings
+        self.max_position_embeddings = max_position_embeddings
         self.context_length = context_length # Context length that was used to train the model
         self.n_heads = n_heads # Number of attention heads
         self.n_layers = n_layers # Number of layers
@@ -212,7 +210,7 @@ class GroupQueryAttention(nn.Module):
         self.config = config
         self.layer_idx = layer_idx
         self.num_heads = config.n_heads
-        self.head_dim = config.head_dim
+        self.head_dim = config.hidden_size // config.n_heads
         self.num_kv_groups = config.n_kv_groups
         self.group_size = config.n_heads // config.n_kv_groups
 
@@ -277,7 +275,7 @@ class TransformerBlock(nn.Module):
         residual = hidden_states
 
         hidden_states = self.norm1(hidden_states)
-        hidden_states,_, = self.att(hidden_states=hidden_states,attention_mask=attention_mask,position_ids=position_ids,kv_cache=kv_cache,)
+        hidden_states = self.att(hidden_states=hidden_states, attention_mask=attention_mask, position_ids=position_ids, kv_cache=kv_cache)
 
         hidden_states = residual+ hidden_states
         residual = hidden_states

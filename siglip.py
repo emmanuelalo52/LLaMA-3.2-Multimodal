@@ -29,25 +29,30 @@ class SiglipVisionConfig:
         self.num_image_tokens = num_image_tokens
 
 #Embedding layer
-class SiglipVisionEmbedding(nn.Module):
-    def __init__(self, config:SiglipVisionConfig):
+class SiglipVisionEmbeddings(nn.Module):
+    def __init__(self, config: SiglipVisionConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
 
-        self.patch_embedding = nn.Conv2d(in_channels=config.num_channels,
-                                         out_channels=self.embed_dim,
-                                         kernel_size=self.patch_size,
-                                         stride=self.patch_size,
-                                         padding="valid",)
-        self.num_patches = (self.image_size // self.patch_size)**2
+        self.patch_embedding = nn.Conv2d(
+            in_channels=config.num_channels,
+            out_channels=self.embed_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+            padding="valid",
+        )
+
+        self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches
-        self.position_embedding = nn.Embedding(self.num_positions,self.embed_dim)
-        self.register_buffer("position_ids",
-                             torch.arange(self.num_positions).expand((1,-1)),
-                             persistent=False,)
+        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
+        self.register_buffer(
+            "position_ids",
+            torch.arange(self.num_positions).expand((1, -1)),
+            persistent=False,
+        )
     
     def forward(self,pixel_values:torch.FloatTensor):
         _,_,height,width = pixel_values.shape
@@ -186,15 +191,15 @@ class SiglipVisionTransformer(nn.Module):
     def __init__(self,config:SiglipVisionConfig):
         super().__init__()
         embed_dim = config.hidden_size
-        self.embedding = SiglipVisionEmbedding(config)
+        self.embedding = SiglipVisionEmbeddings(config)
         self.encoder = SiglipEncoder(config)
 
         self.layernorm = nn.LayerNorm(embed_dim,eps=config.layer_norm_eps)
     def forward(self,pixel_values:torch.Tensor):
         #dimension [Batch_size,channels,height,width] -> dimension[Batch_size,num_patches,Embed_dim]
         hidden_states = self.embedding(pixel_values)
-        last_hidden_state = self.encoder(input=hidden_states)
-        last_hidden_state = self.layernorm(last_hidden_state)
+        last_hidden_state = self.encoder(hidden_states)
+        last_hidden_state = self.post_layernorm(last_hidden_state)
 
         return last_hidden_state
 #Siglip Model
