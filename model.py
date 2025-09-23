@@ -346,6 +346,33 @@ class Llama3Model(nn.Module):
         hidden_state = self.final_norm(hidden_state)
         return hidden_state
 
+class Llama3ForCausalLM(nn.Module):
+
+    def __init__(self, config:LLAMA32Config):
+        super().__init__()
+
+        self.model = Llama3Model(config)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+    def forward(self, 
+                input_ids=None, 
+                input_embeds=None,
+                attention_mask=None, 
+                position_ids=None, 
+                kv_cache=None):
+        
+        outputs, kv_cache = self.model(
+            input_ids, 
+            input_embeds,
+            attention_mask=attention_mask, 
+            position_ids=position_ids, 
+            kv_cache=kv_cache
+        )
+
+        logits = self.lm_head(outputs)
+ 
+        return logits, kv_cache
 
 class MllamaForConditionalGeneration(nn.Module):
     def __init__(self)
