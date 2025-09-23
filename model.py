@@ -375,4 +375,215 @@ class Llama3ForCausalLM(nn.Module):
         return logits, kv_cache
 
 class MllamaForConditionalGeneration(nn.Module):
-    def __init__(self)
+    def __init__(self, config: MLLAMAConfig):
+        super().__init__()
+        self.config = config
+        self.vocab_size = config.vocab_size
+        self.text_config = config.text_config
+        self.vision_config = config.vision_config
+        self.ignore_index = config.ignore_index
+        self.image_token_index = config.image_token_index
+        
+        # Vision components
+        self.vision_model = SiglipModel(config.vision_config)
+        self.multi_modal_projector = MultiModalProjector(config)
+        
+        # Language model
+        self.language_model = Llama3ForCausalLM(config.text_config)
+        
+        # For proper initialization
+        self.post_init()
+    
+    def post_init(self):
+        """Initialize weights properly"""
+        pass
+    
+    def get_input_embeddings(self):
+        return self.language_model.model.tok_emb
+    
+    def forward(
+        self,
+        input_ids=None,
+        pixel_values=None,
+        attention_mask=None,
+        position_ids=None,
+        image_mask=None,
+        labels=None,
+        kv_cache=None,
+        **kwargs
+    ):
+        # Process images if provided
+        image_features = None
+        if pixel_values is not None:
+            # Get vision features: [batch_size, num_patches, vision_hidden_size]  
+            image_features = self.vision_model(pixel_values)
+            # Project to language model space: [batch_size, num_patches, projection_dim]
+            image_features = self.multi_modal_projector(image_features)
+        
+        # Get text embeddings
+        inputs_embeds = None
+        if input_ids is not None:
+            inputs_embeds = self.language_model.model.get_input_embeddings()(input_ids)
+        
+        # Merge image and text embeddings
+        if image_features is not None and inputs_embeds is not None:
+            inputs_embeds, attention_mask = self._merge_input_ids_with_image_features(
+                image_features, inputs_embeds, input_ids, attention_mask
+            )
+        
+        # Forward through language model
+        outputs = self.language_model.model(
+            input_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            kv_cache=kv_cache
+        )
+        
+        # Get logits
+        logits = self.language_model.lm_head(outputs)
+        
+        loss = None
+        if labels is not None:
+            # Simple loss computation - data preprocessing should handle masking
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            
+            loss_fct = nn.CrossEntropyLoss(ignore_index=self.ignore_index)
+            loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)), 
+                shift_labels.view(-1)
+            )
+        
+        return {
+            'logits': logits,
+            'loss': loss,
+            'hidden_states': outputs,
+            'kv_cache': kv_cache
+        }
+    
+    def _merge_input_ids_with_image_features(
+        self, 
+        image_features, 
+        inputs_embeds, 
+        input_ids, 
+        attention_mask
+    ):
+        """
+        Merge text and image embeddings by replacing image tokens with image features
+        """
+        batch_size, seq_len = input_ids.shape
+        _, num_image_patches, embed_dim = image_features.shape
+        
+        # Create new embeddings and attention mask tensors
+        final_embeddings = inputs_embeds.clone()
+        final_attention_mask = attention_mask.clone() if attention_mask is not None else torch.ones_like(input_ids)
+        
+        # Find positions of image tokens
+        image_token_mask = input_ids == self.image_token_index
+        
+        for batch_idx in range(batch_size):
+            # Get image token positions for this batch
+            img_positions = torch.where(image_token_mask[batch_idx])[0]
+            
+            if len(img_positions) > 0:
+                # Replace the first num_image_patches image tokens with actual image features
+                start_pos = img_positions[0]
+                end_pos = min(start_pos + num_image_patches, seq_len)
+                actual_patches = end_pos - start_pos
+                
+                # Insert image features
+                final_embeddings[batch_idx, start_pos:end_pos] = image_features[
+                    batch_idx, :actual_patches
+                ]
+                
+                # Ensure image positions have attention (not masked)
+                final_attention_mask[batch_idx, start_pos:end_pos] = 1
+        
+        return final_embeddings, final_attention_mask
+    
+    def _compute_loss_with_masking(self, logits, labels, input_ids):
+        """
+        Compute loss with proper masking for Llama VLM:
+        - Mask image tokens (don't predict them)
+        - Mask user prompts/system messages  
+        - Only compute loss on assistant responses
+        
+        Expected format: <image_tokens><user_prompt><assistant_response>
+        """
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        shift_input_ids = input_ids[..., 1:].contiguous()
+        
+        batch_size, seq_len = shift_labels.shape
+        
+        # Create loss mask - start with all tokens masked
+        loss_mask = torch.zeros_like(shift_labels, dtype=torch.bool)
+        
+        for batch_idx in range(batch_size):
+            # Find special tokens that indicate where assistant response starts
+            # This depends on your tokenizer's special tokens
+            # Common patterns: "assistant", "<|start_header_id|>assistant<|end_header_id|>", etc.
+            
+            # Method 1: If you have specific assistant start/end tokens
+            # assistant_start_positions = torch.where(shift_input_ids[batch_idx] == ASSISTANT_START_TOKEN)[0]
+            
+            # Method 2: Mask everything except labels that aren't ignore_index
+            # This assumes your data preprocessing already set ignore_index correctly
+            valid_label_positions = shift_labels[batch_idx] != self.ignore_index
+            loss_mask[batch_idx] = valid_label_positions
+            
+            # Additional masking: Always mask image tokens even if labels say otherwise
+            image_token_positions = shift_input_ids[batch_idx] == self.image_token_index
+            loss_mask[batch_idx] = loss_mask[batch_idx] & ~image_token_positions
+        
+        # Apply the mask to labels
+        masked_labels = shift_labels.clone()
+        masked_labels[~loss_mask] = self.ignore_index
+        
+        # Compute loss only on unmasked tokens
+        loss_fct = nn.CrossEntropyLoss(ignore_index=self.ignore_index, reduction='mean')
+        loss = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)), 
+            masked_labels.view(-1)
+        )
+        
+        return loss
+        
+    def _create_conversation_mask(self, input_ids, tokenizer):
+        """
+        Alternative method: Create mask based on conversation structure
+        Assumes format: <image><|start_header_id|>user<|end_header_id|>prompt<|start_header_id|>assistant<|end_header_id|>response
+        """
+        batch_size, seq_len = input_ids.shape
+        mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        
+        # Get special token IDs (you'll need to adapt these to your tokenizer)
+        try:
+            assistant_start_id = tokenizer.convert_tokens_to_ids("<|start_header_id|>assistant<|end_header_id|>")
+            user_start_id = tokenizer.convert_tokens_to_ids("<|start_header_id|>user<|end_header_id|>")
+        except:
+            # Fallback: just unmask non-image, non-pad tokens
+            # You'll need to customize this based on your actual token format
+            return input_ids != self.image_token_index
+        
+        for batch_idx in range(batch_size):
+            # Find assistant response sections
+            assistant_positions = []
+            for i in range(seq_len):
+                if input_ids[batch_idx, i] == assistant_start_id:
+                    # Find end of assistant response (next user turn or end of sequence)
+                    end_pos = seq_len
+                    for j in range(i + 1, seq_len):
+                        if input_ids[batch_idx, j] == user_start_id:
+                            end_pos = j
+                            break
+                    assistant_positions.append((i, end_pos))
+            
+            # Unmask assistant response tokens
+            for start, end in assistant_positions:
+                mask[batch_idx, start:end] = True
+                
+            # Always mask image tokens
+            mask[batch_idx] = mask[batch_idx] & (input_ids[batch_idx] != self.image_token_index)
+        
+        return mask
