@@ -192,82 +192,75 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
 class FeedForward(nn.Module):
     def __init__(self,config:LLAMA32Config):
         super().__init__()
-        self.fc1 = nn.Linear(config.emb_dim, config.hidden_dim, dtype=config.dtype, bias=False)
-        self.fc2 = nn.Linear(config.emb_dim, config.hidden_dim, dtype=config.dtype, bias=False)
-        self.fc3 = nn.Linear(config.hidden_dim,config.emb_dim,dtype=config.dtype,bias=False)
+        self.fc1 = nn.Linear(config.hidden_size, config.hidden_dim, dtype=config.dtype, bias=False)
+        self.fc2 = nn.Linear(config.hidden_size, config.hidden_dim, dtype=config.dtype, bias=False)
+        self.fc3 = nn.Linear(config.hidden_dim, config.hidden_size, dtype=config.dtype, bias=False)
     def forward(self,x):
         fc1 = self.fc1(x)
         fc2 = self.fc2(x)
-        x = Functional.silu(fc1 * fc2) 
+        x = Functional.silu(fc1) * fc2 
         return self.fc3(x)
     
     
 #Group Query attention with KV cache
 class GroupQueryAttention(nn.Module):
-    def __init__(
-            self,config:LLAMA32Config,layer_idx=None,dtype=None
-    ):
+    def __init__(self, config: LLAMA32Config, layer_idx=None, dtype=None):
         super().__init__()
-        assert config.hidden_size % config.n_heads == 0, "d_out must be divisible by num_heads"
-        assert config.n_heads % config.n_kv_groups == 0, "num_heads must be divisible by num_kv_groups"
+        assert config.hidden_size % config.n_heads == 0, "hidden_size must be divisible by n_heads"
+        assert config.n_heads % config.n_kv_groups == 0, "n_heads must be divisible by n_kv_groups"
 
         self.config = config
         self.layer_idx = layer_idx
-
         self.num_heads = config.n_heads
-        self.head_dim = config.hidden_size // config.n_heads
-        
-
-        self.W_key = nn.Linear(config.hidden_size, config.n_kv_groups * self.head_dim, bias=False, dtype=dtype)
-        self.W_value = nn.Linear(config.hidden_size, config.n_kv_groups * self.head_dim, bias=False, dtype=dtype)
+        self.head_dim = config.head_dim
         self.num_kv_groups = config.n_kv_groups
         self.group_size = config.n_heads // config.n_kv_groups
 
         self.W_query = nn.Linear(config.hidden_size, config.n_heads * self.head_dim, bias=False, dtype=dtype)
+        self.W_key = nn.Linear(config.hidden_size, config.n_kv_groups * self.head_dim, bias=False, dtype=dtype)
+        self.W_value = nn.Linear(config.hidden_size, config.n_kv_groups * self.head_dim, bias=False, dtype=dtype)
         self.out_proj = nn.Linear(config.n_heads * self.head_dim, config.hidden_size, bias=False, dtype=dtype)
-        self.rotary_emb = LLAMARotaryEmbedding(dim=self.head_dim,max_position_embeddings=self.max_position_embeddings,base=self.rope_theta,)
-
+        
+        self.rotary_emb = LLAMARotaryEmbedding(config)
         self.is_causal = True
 
-    def forward(self,hidden_states,attention_mask=None,position_ids=None,kv_cache=None):
-        b,num_tokens,_ = hidden_states.shape
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, kv_cache=None):
+        b, num_tokens, _ = hidden_states.shape
+        
         query = self.W_query(hidden_states)
         key = self.W_key(hidden_states)
         value = self.W_value(hidden_states)
 
-        query = query.view(b,num_tokens,self.num_heads,self.head_dim)
-        key = key.view(b,num_tokens,self.num_kv_groups,self.head_dim)
-        value = value.view(b,num_tokens,self.num_kv_groups,self.head_dim)
+        query = query.view(b, num_tokens, self.num_heads, self.head_dim)
+        key = key.view(b, num_tokens, self.num_kv_groups, self.head_dim)
+        value = value.view(b, num_tokens, self.num_kv_groups, self.head_dim)
 
-        #Transpose
-        queries = query.transpose(1,2)
-        values = value.transpose(1,2)
-        keys = key.transpose(1,2)
+        # Transpose: [batch, seq_len, heads, head_dim] -> [batch, heads, seq_len, head_dim]
+        queries = query.transpose(1, 2)
+        keys = key.transpose(1, 2)
+        values = value.transpose(1, 2)
 
-        #apply rope
-        cos,sin = self.rotary_emb(values,position_ids,seq_len=None)
-        queries,keys = apply_rotary_pos_emb(queries,keys,cos,sin)
+        # Apply RoPE
+        cos, sin = self.rotary_emb(values, position_ids, seq_len=None)
+        queries, keys = apply_rotary_pos_emb(queries, keys, cos, sin)
 
         if kv_cache is not None:
-            keys,queries = kv_cache.update(keys,queries,self.layer_idx)
+            keys, values = kv_cache.update(keys, values, self.layer_idx)
 
-        #expand to maximum length
-        keys = repeat_kv(keys,self.group_size)
-        values = repeat_kv(values,self.group_size)
+        # Expand keys and values for group query attention
+        keys = repeat_kv(keys, self.group_size)
+        values = repeat_kv(values, self.group_size)
 
-        #attention score
-        attn_score = queries @ keys.transpose(2,3)
-        # mask = self.mask[:num_tokens,:num_tokens].bool()
+        # Attention scores
+        attn_score = queries @ keys.transpose(2, 3)
+        
         if attention_mask is not None:
-
-            # Crop Attetion Mask to only include upto the number of key/value tokens we have to attend to 
             causal_mask = attention_mask[:, :, :, :keys.shape[-2]]
-
-            # Add Causal Mask to score
             attn_score = attn_score + causal_mask
         
-        attn_weight = torch.softmax(attn_score/(keys.shape[-1]**0.5),dim=-1)
-        context_vector = (attn_weight @ values).transpose(1,2)
+        attn_weight = torch.softmax(attn_score / (keys.shape[-1] ** 0.5), dim=-1)
+        context_vector = (attn_weight @ values).transpose(1, 2).contiguous()
+        context_vector = context_vector.reshape(b, num_tokens, -1)
         context_vector = self.out_proj(context_vector)
 
         return context_vector
@@ -306,72 +299,65 @@ class MultiModalProjector(nn.Module):
         return hidden_states
 
 class Llama3Model(nn.Module):
-    def __init__(self, config:LLAMA32Config):
+    def __init__(self, config: LLAMA32Config):
         super().__init__()
-
-        # Main model parameters
         self.config = config
-        self.pad_token_id  = config.pad_token_index
-        self.tok_emb = nn.Embedding(config.vocab_size, config.hidden_size,self.pad_token_id, dtype=config.dtype)
+        self.pad_token_id = config.pad_token_index
+        self.tok_emb = nn.Embedding(config.vocab_size, config.hidden_size, 
+                                   padding_idx=self.pad_token_id, dtype=config.dtype)
 
-        self.trf_blocks = nn.ModuleList(  # ModuleList since Sequential can only accept one input, and we need `x, mask, cos, sin`
-            [TransformerBlock(config) for _ in range(config.n_layers)]
-        )
+        self.trf_blocks = nn.ModuleList([
+            TransformerBlock(config, layer_idx) for layer_idx in range(config.n_layers)
+        ])
 
-        self.final_norm = LLAMARMSNorm(config.hidden_size, eps=1e-5)
-        self.out_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False, dtype=config.dtype)
+        self.final_norm = LLAMARMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # Reusuable utilities
-        self.rotary_emb = LLAMARotaryEmbedding(config)
-
-    def get_input_embeeddings(self):
+    def get_input_embeddings(self):
         return self.tok_emb
 
-    def forward(self,attention_mask=None,positon_ids=None,input_embeds=None,kv_cache=None,):
-        # Forward pass
-        hidden_state = self.tok_emb()
-        normalizer = torch.tensor(self.config.hidden_size**0.5,dtype=hidden_state.dtype)
+    def forward(self, input_ids=None, input_embeds=None, attention_mask=None, 
+                position_ids=None, kv_cache=None):
+        if input_embeds is not None:
+            hidden_state = input_embeds
+        elif input_ids is not None:
+            hidden_state = self.tok_emb(input_ids)
+        else:
+            raise ValueError("Either input_ids or input_embeds must be provided")
 
+        # Apply scaling (this is optional, some models do this)
+        normalizer = torch.tensor(self.config.hidden_size ** 0.5, dtype=hidden_state.dtype)
         hidden_state = hidden_state * normalizer
 
-
-               
         for block in self.trf_blocks:
-            hidden_state = block(hidden_state,
-                                 attention_mask=attention_mask,
-                                 positon_ids=positon_ids,
-                                 input_embeds=input_embeds,
-                                 kv_cache=kv_cache,
-                                 )
+            hidden_state = block(
+                hidden_state,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                kv_cache=kv_cache,
+            )
+        
         hidden_state = self.final_norm(hidden_state)
         return hidden_state
 
 class Llama3ForCausalLM(nn.Module):
-
-    def __init__(self, config:LLAMA32Config):
+    def __init__(self, config: LLAMA32Config):
         super().__init__()
-
         self.model = Llama3Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-    def forward(self, 
-                input_ids=None, 
-                input_embeds=None,
-                attention_mask=None, 
-                position_ids=None, 
-                kv_cache=None):
+    def forward(self, input_ids=None, input_embeds=None, attention_mask=None, 
+                position_ids=None, kv_cache=None):
         
-        outputs, kv_cache = self.model(
-            input_ids, 
-            input_embeds,
-            attention_mask=attention_mask, 
-            position_ids=position_ids, 
+        outputs = self.model(
+            input_ids=input_ids,
+            input_embeds=input_embeds,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
             kv_cache=kv_cache
         )
 
         logits = self.lm_head(outputs)
- 
         return logits, kv_cache
 
 class MllamaForConditionalGeneration(nn.Module):
