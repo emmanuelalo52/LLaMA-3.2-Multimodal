@@ -1,7 +1,7 @@
 
 # MLLAMA using LLAMA 3.2 VLM configuration and Siglip
 
-> A thorough, practical, and implementation-focused README for the multimodal codebase including the Siglip vision transformer, Llama-style language model, and the image processing utilities. This file documents the files you provided, explains APIs, gives examples, and suggests training/debugging guidance.
+> A thorough, practical, and implementation-focused README for the multimodal codebase including the Siglip vision transformer, Llama-style language model, and the image processing utilities. This repository explains APIs, gives examples, and suggests training/debugging guidance.
 
 ---
 ## Table of contents
