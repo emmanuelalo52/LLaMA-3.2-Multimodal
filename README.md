@@ -25,16 +25,12 @@ This repository implements a small vision transformer (Siglip) and a Llama-style
 - A projection layer that maps vision embeddings into the language model embedding space.
 - A Llama-like autoregressive transformer that consumes merged text+image embeddings for multimodal generation.
 
-This README documents the code you uploaded and provides practical usage examples, bug fixes, and suggestions for training and evaluation.
-
 ---
 ## Repository structure (what I saw)
 
 - `siglip.py` — **(the Siglip vision transformer code you pasted in chat)** — Vision encoder implementation (patch embedding, position embedding, multi-head attention, MLP and transformer encoder layers). 
 - `model.py` — Language + multimodal model (Llama variants, rotary embeddings, grouped-query attention, multimodal projector, and the top-level `MllamaForConditionalGeneration`). fileciteturn0file0
 - `processing_mllama.py` — Image preprocessing and `MllamaImageProcessor` helper (resizing, normalization, token insertion). fileciteturn0file1
-
-> Note: I reference `model.py` and `processing_mllama.py` above because they were uploaded and are available. The Siglip code was provided in the message — treat it as `siglip.py` for the examples below.
 
 ---
 ## Installation & dependencies
