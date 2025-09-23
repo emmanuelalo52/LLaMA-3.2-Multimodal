@@ -267,8 +267,6 @@ def test_siglip_shapes():
 
 ---
 ## Changelog / Known limitations
-
-- This code is an engineering prototype: it contains minor API mismatches and a handful of bugs (documented above). After applying the fixes in the "Common issues" section the code will be in a much better shape for experimentation.
 - `MllamaForConditionalGeneration.forward` currently computes simple shifted cross-entropy. For real VLM training, use `_compute_loss_with_masking` (or plug in dataset-specific masking logic).
 
 ---
