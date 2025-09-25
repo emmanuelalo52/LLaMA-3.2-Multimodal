@@ -238,8 +238,7 @@ Always ensure the checkpoint vocabulary (tokenizer) and config (vocab_size, imag
 
 ---
 
-# Tips, caveats & TODOs / known issues
-- **`"pixel Value"` key** — The image processor returns pixel data under `"pixel Value"` with a space. That's unusual; consider renaming to `pixel_values` for compatibility.  
+# Tips, caveats & TODOs / known issues 
 - **Tokenizer expectations** — Code relies on a tokenizer that can add special tokens and convert them to ids. `transformers` tokenizers (HF) are a good choice; ensure `vocab_size` matches the LM config.  
 - **Loss masking** — `_compute_loss_with_masking` and `_create_conversation_mask` offer two approaches for selective loss computation; they assume your dataset uses `ignore_index` appropriately. Validate on your dataset.  
 - **Checkpoint compatibility** — If you load checkpoints trained with different architectures (different `n_heads`, `hidden_size`, etc.), layers may mismatch. Use `strict=False` only when you understand missing/extra keys.  
