@@ -261,12 +261,3 @@ Always ensure the checkpoint vocabulary (tokenizer) and config (vocab_size, imag
 - Implementation inspired by standard transformer building blocks (rotary positional embeddings, ViT patch embeddings, Grouped-kv attention patterns) and LoRA techniques. See code-level comments in `model.py` and `siglip.py` for more contextual details.
 
 ---
-
-# Final notes & next steps (recommended)
-1. **Add a `scripts/` folder** with:
-   - `train.py` (training loop, logging, checkpointing)
-   - `eval.py` (perplexity / VQA / captioning evaluation)
-   - `convert_lo_ra.py` (utility to patch models with LoRA)
-2. **Add example checkpoints** (or instructions to convert HF checkpoints).  
-3. **Rename `"pixel Value"`** to `pixel_values` in `processing_mllama.py` for consistency.  
-4. **Add a short demo notebook** showing a full inference pipeline (tokenizer, example image, output decoding) — very helpful for users.
