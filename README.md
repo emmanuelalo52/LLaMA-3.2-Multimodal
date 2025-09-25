@@ -255,10 +255,7 @@ Always ensure the checkpoint vocabulary (tokenizer) and config (vocab_size, imag
 ---
 
 # License & citation
-- Suggested: **MIT** (or choose any license you prefer). Add a `LICENSE` file to the repo.
-
-If you use or extend this project in publications, please cite the relevant transformer / ViT / LoRA / RoPE papers that inspired these components.
-
+- **MIT**
 ---
 
 # Acknowledgements
