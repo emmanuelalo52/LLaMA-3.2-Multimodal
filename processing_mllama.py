@@ -88,6 +88,6 @@ class MllamaImageProcessor:
         # Returns the input_ids and attention_mask as PyTorch tensors
         inputs = self.tokenizer(input_strings,return_tensors = "pt",padding=padding,truncation=truncation)
 
-        return_data = {"pixel Value": pixel_values, **inputs}
+        return_data = {"pixel_value": pixel_values, **inputs}
 
         return return_data
