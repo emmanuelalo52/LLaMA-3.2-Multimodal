@@ -238,8 +238,7 @@ Always ensure the checkpoint vocabulary (tokenizer) and config (vocab_size, imag
 
 ---
 
-# Tips, caveats & TODOs / known issues
-- **`"pixel Value"` key** — The image processor returns pixel data under `"pixel Value"` with a space. That's unusual; consider renaming to `pixel_values` for compatibility.  
+# Tips, caveats & TODOs / known issues 
 - **Tokenizer expectations** — Code relies on a tokenizer that can add special tokens and convert them to ids. `transformers` tokenizers (HF) are a good choice; ensure `vocab_size` matches the LM config.  
 - **Loss masking** — `_compute_loss_with_masking` and `_create_conversation_mask` offer two approaches for selective loss computation; they assume your dataset uses `ignore_index` appropriately. Validate on your dataset.  
 - **Checkpoint compatibility** — If you load checkpoints trained with different architectures (different `n_heads`, `hidden_size`, etc.), layers may mismatch. Use `strict=False` only when you understand missing/extra keys.  
@@ -255,22 +254,10 @@ Always ensure the checkpoint vocabulary (tokenizer) and config (vocab_size, imag
 ---
 
 # License & citation
-- Suggested: **MIT** (or choose any license you prefer). Add a `LICENSE` file to the repo.
-
-If you use or extend this project in publications, please cite the relevant transformer / ViT / LoRA / RoPE papers that inspired these components.
-
+- **MIT**
 ---
 
 # Acknowledgements
 - Implementation inspired by standard transformer building blocks (rotary positional embeddings, ViT patch embeddings, Grouped-kv attention patterns) and LoRA techniques. See code-level comments in `model.py` and `siglip.py` for more contextual details.
 
 ---
-
-# Final notes & next steps (recommended)
-1. **Add a `scripts/` folder** with:
-   - `train.py` (training loop, logging, checkpointing)
-   - `eval.py` (perplexity / VQA / captioning evaluation)
-   - `convert_lo_ra.py` (utility to patch models with LoRA)
-2. **Add example checkpoints** (or instructions to convert HF checkpoints).  
-3. **Rename `"pixel Value"`** to `pixel_values` in `processing_mllama.py` for consistency.  
-4. **Add a short demo notebook** showing a full inference pipeline (tokenizer, example image, output decoding) — very helpful for users.
