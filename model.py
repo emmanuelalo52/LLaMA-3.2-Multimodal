@@ -9,7 +9,37 @@ from safetensors.torch import load_file
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 from siglip import SiglipVisionConfig,SiglipModel
+class KVCache():
 
+    def __init__(self):
+        self.key_cache = []
+        self.value_cache = []
+    
+    def num_items(self):
+        if len(self.key_cache) == 0:
+            return 0
+        else:
+            # The shape of the key_cache is [Batch_Size, Num_Heads_KV, Seq_Len, Head_Dim]
+            return self.key_cache[0].shape[-2]
+
+    def update(
+        self,
+        key_states,
+        value_states,
+        layer_idx,
+    ):
+        if len(self.key_cache) <= layer_idx:
+            # If we never added anything to the KV-Cache of this layer, let's create it.
+            self.key_cache.append(key_states)
+            self.value_cache.append(value_states)
+        else:
+            # ... otherwise we concatenate the new keys with the existing ones.
+            # each tensor has shape: [Batch_Size, Num_Heads_KV, Seq_Len, Head_Dim]
+            self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
+            self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
+
+        # ... and then we return all the existing keys + the new ones.
+        return self.key_cache[layer_idx], self.value_cache[layer_idx]
 class LLAMA32Config():
     def __init__(self,
                  vocab_size,
