@@ -1,2 +1,18 @@
 
 .vscode/settings.json
+.vscode/c_cpp_properties.json
+.vscode/c_cpp_properties.json
+build/lib.linux-x86_64-3.10/rmsnorm.cpython-310-x86_64-linux-gnu.so
+build/temp.linux-x86_64-3.10/.ninja_log
+build/temp.linux-x86_64-3.10/build.ninja
+build/temp.linux-x86_64-3.10/Inference/rmsnorm.o
+.gitignore
+build/temp.linux-x86_64-3.10/.ninja_deps
+.vscode/c_cpp_properties.json
+.vscode/c_cpp_properties.json
+.vscode/c_cpp_properties.json
+.vscode/c_cpp_properties.json
+.vscode/c_cpp_properties.json
+.vscode/c_cpp_properties.json
+.vscode/c_cpp_properties.json
+.vscode/c_cpp_properties.json
