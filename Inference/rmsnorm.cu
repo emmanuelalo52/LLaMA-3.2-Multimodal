@@ -4,24 +4,28 @@
 #include "rmsnorm.cuh"
 
 // Forward pass
-torch::Tensor rmsnorm_forward(torch::Tensor input, torch::Tensor weight, float eps) {
-    const int N = input.size(0);
-    const int C = input.size(1);
-    auto output = torch::empty_like(input);
+std::vector<torch::Tensor> rmsnorm_forward(torch::Tensor input, torch::Tensor weight, float eps) {
+    // Robustly handle 2D or 3D tensors by flattening all but the last dimension
+    const int N = input.numel() / input.size(-1); 
+    const int C = input.size(-1);
     
-    // Calculate shared memory: (BLOCK_SIZE / 32) * sizeof(float)
-    // We use 512 for BLOCK_SIZE to match our kernel templates
-    size_t shared_mem = (512 / 32) * sizeof(float);
+    auto output = torch::empty_like(input);
+    // Allocate RMS as float32 for high-precision backward pass
+    auto rms = torch::empty({N}, torch::dtype(torch::kFloat32).device(input.device()));
+    
+    // Allocate enough shared memory for warp reduction results
+    constexpr int BLOCK_SIZE = 512;
+    size_t shared_mem = sizeof(float) * ((BLOCK_SIZE + 31) / 32);
 
-    kernels::rmsnorm_kernel_vectorized<at::Half, 512, false><<<N, 512, shared_mem>>>(
+    kernels::rmsnorm_kernel_vectorized<at::Half, BLOCK_SIZE, true><<<N, BLOCK_SIZE, shared_mem>>>(
         reinterpret_cast<at::Half*>(output.data_ptr<at::Half>()),
-        nullptr,
+        rms.data_ptr<float>(), 
         reinterpret_cast<const at::Half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const at::Half*>(weight.data_ptr<at::Half>()),
         N, C, eps
     );
 
-    return output;
+    return {output, rms};
 }
 
 // Backward pass
@@ -31,16 +35,16 @@ std::vector<torch::Tensor> rmsnorm_backward(
     torch::Tensor weight, 
     torch::Tensor rms) {
     
-    const int N = input.size(0);
-    const int C = input.size(1);
+    const int N = input.numel() / input.size(-1);
+    const int C = input.size(-1);
     
     auto d_input = torch::empty_like(input);
-    // d_weight is float32 for atomicAdd accuracy
     auto d_weight = torch::zeros({C}, torch::dtype(torch::kFloat32).device(input.device()));
 
-    size_t shared_mem = (512 / 32) * sizeof(float);
+    constexpr int BLOCK_SIZE = 512;
+    size_t shared_mem = sizeof(float) * ((BLOCK_SIZE + 31) / 32);
 
-    kernels::rmsnorm_backward_kernel<at::Half, 512><<<N, 512, shared_mem>>>(
+    kernels::rmsnorm_backward_kernel<at::Half, BLOCK_SIZE><<<N, BLOCK_SIZE, shared_mem>>>(
         reinterpret_cast<at::Half*>(d_input.data_ptr<at::Half>()),
         d_weight.data_ptr<float>(),
         reinterpret_cast<const at::Half*>(grad_out.data_ptr<at::Half>()),
@@ -50,11 +54,10 @@ std::vector<torch::Tensor> rmsnorm_backward(
         N, C
     );
 
-    // Cast d_weight back to Half to match the model's expectations
-    return {d_input, d_weight.to(torch::kHalf)};
+    // Convert d_weight to match input dtype
+    return {d_input, d_weight.to(input.scalar_type())};
 }
 
-// Bind to Python
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("forward", &rmsnorm_forward, "RMSNorm Forward (CUDA)");
     m.def("backward", &rmsnorm_backward, "RMSNorm Backward (CUDA)");

@@ -9,6 +9,7 @@ from safetensors.torch import load_file
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 from siglip import SiglipVisionConfig,SiglipModel
+import rmsnorm
 class KVCache():
 
     def __init__(self):
@@ -149,21 +150,37 @@ def repeat_kv(hidden_states, n_rep):
 
     
 #RMSNorm
+class RMSNormFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, weight, eps):
+        x = x.contiguous()
+        weight = weight.contiguous()
+        output, rms = rmsnorm.forward(x, weight, eps)
+        ctx.save_for_backward(x, weight, rms)
+        ctx.eps = eps
+        return output
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, weight, rms = ctx.saved_tensors
+        grad_output = grad_output.contiguous()
+        d_x, d_weight = rmsnorm.backward(grad_output, x, weight, rms)
+        
+        # Ensure dtype matches
+        if d_weight.dtype != weight.dtype:
+            d_weight = d_weight.to(weight.dtype)
+            
+        return d_x, d_weight, None
+
+
 class LLAMARMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.zeros(dim))
-
-    def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        output = self._norm(x.float())
-        # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
-        # See https://github.com/huggingface/transformers/pull/29402
-        output = output * (1.0 + self.weight.float())
-        return output.type_as(x)
+        return RMSNormFunction.apply(x, self.weight, self.eps)
 
 class LLAMARotaryEmbedding(nn.Module):
     def __init__(self,config:LLAMA32Config, device=None):
