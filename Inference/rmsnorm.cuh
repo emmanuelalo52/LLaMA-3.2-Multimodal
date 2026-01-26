@@ -8,94 +8,102 @@
 namespace cg = cooperative_groups;
 
 namespace kernels {
+    constexpr int VEC_SIZE = 4;
+
     template<typename T, int BLOCK_SIZE, bool OUTPUT_RMS = false>
-    __global__ void rmsnorm_kernel_vectorized(T* __restrict__ out, float* __restrict__ rms_out, const T* __restrict__ input, const T* __restrict__ weight, int N, int C, float eps) {
+    __global__ void rmsnorm_kernel_fused(
+        T* __restrict__ out, 
+        float* __restrict__ rms_out, 
+        const T* __restrict__ input, 
+        const T* __restrict__ weight,
+        T* __restrict__ residual, // Removed 'const' to allow in-place update
+        int N, int C, float eps) 
+    {
         cg::thread_block block = cg::this_thread_block();
         cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
-        int tx = blockIdx.x;
-        if (tx >= N) return;
+        int row = blockIdx.x;
+        if (row >= N) return;
 
-        const T* x = input + tx * C;
-        T* o = out + tx * C;
+        // Pointer arithmetic for the current row
+        const T* x_ptr = input + row * C;
+        T* res_ptr = residual + row * C;
+        T* o_ptr = out + row * C;
 
-        extern __shared__ float s_reduce[];
+        __shared__ float shared_data[BLOCK_SIZE / 32];
+        __shared__ float rms_inv_shared;
 
-        // 1. Calculate Sum of Squares
-        constexpr int VEC_SIZE = 4; // 4 halfs in a uint2 (64 bits)
-        int C_vec = C / VEC_SIZE;
         float thread_sum_sq = 0.0f;
+        int C_vec = C / VEC_SIZE;
 
-        const uint2* x_vec = reinterpret_cast<const uint2*>(x);
+        const uint2* x_vec = reinterpret_cast<const uint2*>(x_ptr);
+        uint2* res_vec = reinterpret_cast<uint2*>(res_ptr);
 
+        // Fused Addition + Sum of Squares
         for (int i = threadIdx.x; i < C_vec; i += BLOCK_SIZE) {
-            uint2 v = x_vec[i];
-            __half2* h2_v = reinterpret_cast<__half2*>(&v);
-            #pragma unroll
-            for (int j = 0; j < 2; j++) { // Corrected: uint2 has 2 half2 elements
-                float2 f = __half22float2(h2_v[j]);
-                thread_sum_sq += f.x * f.x + f.y * f.y;
-            }
+            uint2 v_in = x_vec[i];
+            uint2 v_res = res_vec[i];
+            
+            half2* h2_in = reinterpret_cast<half2*>(&v_in);
+            half2* h2_res = reinterpret_cast<half2*>(&v_res);
+
+            // Vectorized addition: residual = input + residual
+            h2_res[0] = __hadd2(h2_in[0], h2_res[0]);
+            h2_res[1] = __hadd2(h2_in[1], h2_res[1]);
+
+            // Update the residual highway in DRAM immediately
+            res_vec[i] = v_res; 
+
+            // Calculate sum of squares using the NEW residual values
+            float2 f0 = __half22float2(h2_res[0]);
+            float2 f1 = __half22float2(h2_res[1]);
+            thread_sum_sq += f0.x * f0.x + f0.y * f0.y + f1.x * f1.x + f1.y * f1.y;
         }
-        
-        // Handle remainder if C is not multiple of 4
+
+        // Handle remainder for non-multiple of 4 widths
         for (int i = C_vec * VEC_SIZE + threadIdx.x; i < C; i += BLOCK_SIZE) {
-            float val = (float)x[i];
+            float val = static_cast<float>(x_ptr[i]) + static_cast<float>(res_ptr[i]);
+            res_ptr[i] = static_cast<T>(val); // Update residual remainder
             thread_sum_sq += val * val;
         }
 
-        // First reduce within warps
-        float warp_sum_sq = cg::reduce(warp, thread_sum_sq, cg::plus<float>());
-        
-        // Then reduce across warps using shared memory
-        if (warp.thread_rank() == 0) {
-            s_reduce[threadIdx.x / 32] = warp_sum_sq;
-        }
+        // Block Reduction
+        float warp_sum = cg::reduce(warp, thread_sum_sq, cg::plus<float>());
+        if (warp.thread_rank() == 0) shared_data[threadIdx.x / 32] = warp_sum;
         block.sync();
-        
-        // Final reduction by first warp
-        float block_sum_sq = 0.0f;
-        if (threadIdx.x < (BLOCK_SIZE + 31) / 32) {
-            block_sum_sq = s_reduce[threadIdx.x];
-        }
-        if (threadIdx.x < 32) {
-            block_sum_sq = cg::reduce(warp, block_sum_sq, cg::plus<float>());
-        }
+
+        float block_sum = 0.0f;
+        if (threadIdx.x < (BLOCK_SIZE / 32)) block_sum = shared_data[threadIdx.x];
+        block_sum = cg::reduce(warp, block_sum, cg::plus<float>());
 
         if (threadIdx.x == 0) {
-            float rms_inv = rsqrtf(block_sum_sq / (float)C + eps);
-            s_reduce[0] = rms_inv;
-            if constexpr (OUTPUT_RMS) {
-                rms_out[tx] = 1.0f / rms_inv;
-            }
+            float inv_rms = rsqrtf(block_sum / static_cast<float>(C) + eps);
+            rms_inv_shared = inv_rms;
+            if constexpr (OUTPUT_RMS) rms_out[row] = 1.0f / inv_rms;
         }
         block.sync();
-        float rms_inv = s_reduce[0];
 
-        // 2. Normalization and Scaling
-        uint2* o_vec = reinterpret_cast<uint2*>(o);
+        // STEP 3: Normalization
+        float rms_inv = rms_inv_shared;
+        uint2* o_vec = reinterpret_cast<uint2*>(o_ptr);
         const uint2* w_vec = reinterpret_cast<const uint2*>(weight);
 
         for (int i = threadIdx.x; i < C_vec; i += BLOCK_SIZE) {
-            uint2 xv = x_vec[i];
-            uint2 wv = w_vec[i];
-            __half2* h2_x = reinterpret_cast<__half2*>(&xv);
-            __half2* h2_w = reinterpret_cast<__half2*>(&wv);
-            uint2 result;
-            __half2* h2_res = reinterpret_cast<__half2*>(&result);
+            uint2 v_sum = res_vec[i]; // Read the already updated residual
+            uint2 v_w = w_vec[i];
+            
+            half2* h2_sum = reinterpret_cast<half2*>(&v_sum);
+            half2* h2_w = reinterpret_cast<half2*>(&v_w);
 
             #pragma unroll
             for (int j = 0; j < 2; j++) {
-                float2 x_f2 = __half22float2(h2_x[j]);
-                float2 w_f2 = __half22float2(h2_w[j]);
-                float2 res_f2 = {x_f2.x * rms_inv * w_f2.x, x_f2.y * rms_inv * w_f2.y};
-                h2_res[j] = __float22half2_rn(res_f2);
+                float2 f_s = __half22float2(h2_sum[j]);
+                float2 f_w = __half22float2(h2_w[j]);
+                f_s.x *= (rms_inv * f_w.x);
+                f_s.y *= (rms_inv * f_w.y);
+                h2_sum[j] = __float22half2_rn(f_s);
             }
-            o_vec[i] = result;
-        }
-        
-        for (int i = C_vec * VEC_SIZE + threadIdx.x; i < C; i += BLOCK_SIZE) {
-            o[i] = (T)((float)x[i] * rms_inv * (float)weight[i]);
+            o_vec[i] = v_sum;
         }
     }
 
@@ -114,44 +122,34 @@ namespace kernels {
         T* dx = d_inp + idx * C;
         
         float r_inv = 1.0f / (rms[idx] + 1e-6f);
-        extern __shared__ float s_reduce[];
+        __shared__ float shared_data[BLOCK_SIZE / 32];
+        __shared__ float correction_shared;
 
         float thread_dot = 0.0f;
         for (int i = threadIdx.x; i < C; i += BLOCK_SIZE) {
-            float g_val = (float)g[i];
-            float x_val = (float)x[i];
-            float w_val = (float)weight[i];
+            float g_val = static_cast<float>(g[i]);
+            float x_val = static_cast<float>(x[i]);
+            float w_val = static_cast<float>(weight[i]);
             thread_dot += g_val * w_val * x_val;
             
-            // Note: Parallel d_weight calculation is usually done in a separate kernel 
-            // to avoid atomicAdd contention. For now, we fix the logic.
             atomicAdd(&d_weight[i], g_val * x_val * r_inv);
         }
 
-        // Warp-level reduction first
         float warp_dot = cg::reduce(warp, thread_dot, cg::plus<float>());
-        
-        if (warp.thread_rank() == 0) {
-            s_reduce[threadIdx.x / 32] = warp_dot;
-        }
+        if (warp.thread_rank() == 0) shared_data[threadIdx.x / 32] = warp_dot;
         block.sync();
         
-        // Final reduction by first warp
         float block_dot = 0.0f;
-        if (threadIdx.x < (BLOCK_SIZE + 31) / 32) {
-            block_dot = s_reduce[threadIdx.x];
-        }
-        if (threadIdx.x < 32) {
-            block_dot = cg::reduce(warp, block_dot, cg::plus<float>());
-        }
+        if (threadIdx.x < (BLOCK_SIZE / 32)) block_dot = shared_data[threadIdx.x];
+        block_dot = cg::reduce(warp, block_dot, cg::plus<float>());
         
-        if (threadIdx.x == 0) s_reduce[0] = block_dot;
+        if (threadIdx.x == 0) correction_shared = block_dot / (static_cast<float>(C) * rms[idx] * rms[idx]);
         block.sync();
 
-        float correction = s_reduce[0] / (C * rms[idx] * rms[idx]);
-
+        float correction = correction_shared;
         for (int i = threadIdx.x; i < C; i += BLOCK_SIZE) {
-            dx[i] = (T)(r_inv * ((float)g[i] * (float)weight[i] - (float)x[i] * correction));
+            // Fixed the static_float typo to static_cast
+            dx[i] = static_cast<T>(r_inv * (static_cast<float>(g[i]) * static_cast<float>(weight[i]) - static_cast<float>(x[i]) * correction));
         }
     }
 }

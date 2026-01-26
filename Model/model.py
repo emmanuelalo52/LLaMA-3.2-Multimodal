@@ -152,10 +152,19 @@ def repeat_kv(hidden_states, n_rep):
 #RMSNorm
 class RMSNormFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weight, eps):
+    def forward(ctx, x, weight, eps, residual=None):
         x = x.contiguous()
         weight = weight.contiguous()
-        output, rms = rmsnorm.forward(x, weight, eps)
+        
+        # If fused, we pass the residual to the kernel for in-place addition
+        if residual is not None:
+            residual = residual.contiguous()
+            # The kernel now takes 5 tensor arguments: out, rms, input, weight, residual
+            output, rms = rmsnorm.forward(x, weight, residual, eps)
+        else:
+            # Fallback for standard RMSNorm (e.g., final_norm)
+            output, rms = rmsnorm.forward(x, weight, eps)
+            
         ctx.save_for_backward(x, weight, rms)
         ctx.eps = eps
         return output
@@ -166,11 +175,11 @@ class RMSNormFunction(torch.autograd.Function):
         grad_output = grad_output.contiguous()
         d_x, d_weight = rmsnorm.backward(grad_output, x, weight, rms)
         
-        # Ensure dtype matches
         if d_weight.dtype != weight.dtype:
             d_weight = d_weight.to(weight.dtype)
             
-        return d_x, d_weight, None
+        # Return 4 values to match forward arguments (x, weight, eps, residual)
+        return d_x, d_weight, None, d_x # d_x flows back to both input and residual
 
 
 class LLAMARMSNorm(nn.Module):
@@ -179,8 +188,9 @@ class LLAMARMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
-    def forward(self, x):
-        return RMSNormFunction.apply(x, self.weight, self.eps)
+    def forward(self, x, residual=None):
+        # Pass the residual tensor to the autograd function
+        return RMSNormFunction.apply(x, self.weight, self.eps, residual)
 
 class LLAMARotaryEmbedding(nn.Module):
     def __init__(self,config:LLAMA32Config, device=None):
@@ -311,29 +321,42 @@ class GroupQueryAttention(nn.Module):
         return context_vector
 
 class TransformerBlock(nn.Module):
-    def __init__(self,config:LLAMA32Config,layer_idx):
+    def __init__(self, config: LLAMA32Config, layer_idx):
         super().__init__()
-        self.config= config
-        self.att = GroupQueryAttention(config,layer_idx=layer_idx,dtype=config.dtype)
-        self.norm1 = LLAMARMSNorm(dim=config.hidden_size,eps=config.rms_norm_eps) 
-        self.norm2 = LLAMARMSNorm(dim=config.hidden_size,eps=config.rms_norm_eps)
+        self.config = config
+        self.att = GroupQueryAttention(config, layer_idx=layer_idx, dtype=config.dtype)
+        self.norm1 = LLAMARMSNorm(dim=config.hidden_size, eps=config.rms_norm_eps) 
+        self.norm2 = LLAMARMSNorm(dim=config.hidden_size, eps=config.rms_norm_eps)
         self.ff = FeedForward(config)
-    def forward(self,hidden_states,attention_mask=None,position_ids=None,kv_cache=None,):
-        residual = hidden_states
 
-        hidden_states = self.norm1(hidden_states)
-        hidden_states = self.att(hidden_states=hidden_states, attention_mask=attention_mask, position_ids=position_ids, kv_cache=kv_cache)
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, kv_cache=None):
+        # 1. Self Attention with Fused Add-RMSNorm
+        # Previous forward: hidden_states = residual + att(norm1(hidden_states))
+        # Now: The norm layer handles the addition internally
+        residual = hidden_states 
+        
+        # norm1 applies RMSNorm(hidden_states). Note: The first norm in a block 
+        # usually doesn't have a residual to add unless you fuse across blocks.
+        normed_x = self.norm1(hidden_states)
+        
+        attn_output = self.att(
+            hidden_states=normed_x, 
+            attention_mask=attention_mask, 
+            position_ids=position_ids, 
+            kv_cache=kv_cache
+        )
 
-        hidden_states = residual+ hidden_states
-        residual = hidden_states
+        # 2. Feed Forward with Fused Add-RMSNorm
+        # Here we pass the attention output as the 'input' and the 
+        # previous 'residual' as the skip connection.
+        # The kernel does: fused = attn_output + residual, then norms 'fused'
+        
+        # This is where the production "Highway" fusion happens
+        normed_ff_input = self.norm2(attn_output, residual=residual)
+        
+        ff_output = self.ff(normed_ff_input)
 
-        hidden_states = self.norm2(hidden_states)
-        hidden_states = self.ff(hidden_states)
-
-        hidden_states = residual + hidden_states
-
-        return hidden_states
-
+        return attn_output + ff_output
 
 class MultiModalProjector(nn.Module):
     def __init__(self,config:MLLAMAConfig):

@@ -3,38 +3,41 @@
 #include <vector>
 #include "rmsnorm.cuh"
 
-// Forward pass
-std::vector<torch::Tensor> rmsnorm_forward(torch::Tensor input, torch::Tensor weight, float eps) {
-    // Robustly handle 2D or 3D tensors by flattening all but the last dimension
+// Fused Forward Pass
+std::vector<torch::Tensor> rmsnorm_forward(
+    torch::Tensor input, 
+    torch::Tensor weight, 
+    torch::Tensor residual, // Accepted from Python
+    float eps) 
+{
     const int N = input.numel() / input.size(-1); 
     const int C = input.size(-1);
     
     auto output = torch::empty_like(input);
-    // Allocate RMS as float32 for high-precision backward pass
     auto rms = torch::empty({N}, torch::dtype(torch::kFloat32).device(input.device()));
     
-    // Allocate enough shared memory for warp reduction results
     constexpr int BLOCK_SIZE = 512;
     size_t shared_mem = sizeof(float) * ((BLOCK_SIZE + 31) / 32);
 
-    kernels::rmsnorm_kernel_vectorized<at::Half, BLOCK_SIZE, true><<<N, BLOCK_SIZE, shared_mem>>>(
+    kernels::rmsnorm_kernel_fused<at::Half, BLOCK_SIZE, true><<<N, BLOCK_SIZE, shared_mem>>>(
         reinterpret_cast<at::Half*>(output.data_ptr<at::Half>()),
         rms.data_ptr<float>(), 
         reinterpret_cast<const at::Half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const at::Half*>(weight.data_ptr<at::Half>()),
+        reinterpret_cast<at::Half*>(residual.data_ptr<at::Half>()), // Pass residual
         N, C, eps
     );
 
     return {output, rms};
 }
 
-// Backward pass
+// Backward Pass remains largely the same logic-wise
 std::vector<torch::Tensor> rmsnorm_backward(
     torch::Tensor grad_out, 
     torch::Tensor input, 
     torch::Tensor weight, 
-    torch::Tensor rms) {
-    
+    torch::Tensor rms) 
+{
     const int N = input.numel() / input.size(-1);
     const int C = input.size(-1);
     
@@ -54,11 +57,11 @@ std::vector<torch::Tensor> rmsnorm_backward(
         N, C
     );
 
-    // Convert d_weight to match input dtype
     return {d_input, d_weight.to(input.scalar_type())};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("forward", &rmsnorm_forward, "RMSNorm Forward (CUDA)");
+    // Update the binding to reflect the new residual argument
+    m.def("forward", &rmsnorm_forward, "Fused Add-RMSNorm Forward (CUDA)");
     m.def("backward", &rmsnorm_backward, "RMSNorm Backward (CUDA)");
 }
