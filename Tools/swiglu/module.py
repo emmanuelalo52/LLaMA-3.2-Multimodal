@@ -13,36 +13,13 @@ except ImportError:
 
 
 class FusedSwiGLUFunction(torch.autograd.Function):
-    """
-    Autograd function for fused SwiGLU operation.
-    
-    Forward: output = SiLU(x @ W_gate + b_gate) * (x @ W_up + b_up)
-    """
-    
     @staticmethod
     def forward(ctx, x, w_gate, w_up, b_gate=None, b_up=None):
-        """
-        Args:
-            x: Input tensor [batch_size, seq_len, hidden_size]
-            w_gate: Gate weight matrix [hidden_size, intermediate_size]
-            w_up: Up weight matrix [hidden_size, intermediate_size]
-            b_gate: Gate bias [intermediate_size] (optional)
-            b_up: Up bias [intermediate_size] (optional)
-        
-        Returns:
-            output: [batch_size, seq_len, intermediate_size]
-        """
         if CUDA_AVAILABLE and x.is_cuda:
-            # Use fused CUDA kernel
-            output = swiglu.forward(x, w_gate, w_up, b_gate, b_up)
-            # Note: The CUDA kernel returns gate_cache and up_cache internally
-            # We need to modify the kernel to return them for backward pass
-            
-            # For now, recompute for backward (we'll optimize this later)
-            gate = F.linear(x, w_gate.t(), b_gate)
-            up = F.linear(x, w_up.t(), b_up)
-            
-            ctx.save_for_backward(x, w_gate, w_up, gate, up)
+            # Receives a list: [output, gate_cache, up_cache]
+            output, gate_cache, up_cache = swiglu.forward(x, w_gate, w_up, b_gate, b_up)
+            ctx.save_for_backward(x, w_gate, w_up, gate_cache, up_cache)
+            return output
         else:
             # Fallback to PyTorch implementation
             gate = F.linear(x, w_gate.t(), b_gate)

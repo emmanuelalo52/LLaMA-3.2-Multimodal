@@ -4,9 +4,10 @@
 #include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <vector>
 
-// Forward declaration of CUDA kernels
-torch::Tensor swiglu_forward_cuda(
+// Forward declaration - returns a vector containing {output, gate_cache, up_cache}
+std::vector<torch::Tensor> swiglu_forward_cuda(
     torch::Tensor x,
     torch::Tensor w_gate,
     torch::Tensor w_up,
@@ -19,8 +20,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> swiglu_backward_cuda(
     torch::Tensor x,
     torch::Tensor w_gate,
     torch::Tensor w_up,
-    torch::Tensor gate_output,
-    torch::Tensor up_output
+    torch::Tensor gate_cache,
+    torch::Tensor up_cache
 );
 
 // Fused SwiGLU + Down projection
@@ -34,4 +35,4 @@ torch::Tensor swiglu_down_forward_cuda(
     torch::Tensor b_down
 );
 
-#endif // SWIGLU_FUSED_CUH
+#endif
