@@ -12,69 +12,31 @@ except ImportError:
     print("To compile: python setup.py install")
 
 
-class FusedSwiGLUFunction(torch.autograd.Function):
+class SwiGLUFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, w_gate, w_up, b_gate=None, b_up=None):
-        if CUDA_AVAILABLE and x.is_cuda:
-            # Receives a list: [output, gate_cache, up_cache]
-            output, gate_cache, up_cache = swiglu.forward(x, w_gate, w_up, b_gate, b_up)
-            ctx.save_for_backward(x, w_gate, w_up, gate_cache, up_cache)
-            return output
-        else:
-            # Fallback to PyTorch implementation
-            gate = F.linear(x, w_gate.t(), b_gate)
-            up = F.linear(x, w_up.t(), b_up)
-            output = F.silu(gate) * up
-            ctx.save_for_backward(x, w_gate, w_up, gate, up)
+        # Kernel expects contiguous tensors
+        x = x.contiguous()
+        w_gate = w_gate.contiguous()
+        w_up = w_up.contiguous()
         
+        # Extension returns (output, gate_cache, up_cache)
+        output, gate_cache, up_cache = swiglu.forward(x, w_gate, w_up, b_gate, b_up)
+        
+        ctx.save_for_backward(x, w_gate, w_up, gate_cache, up_cache)
         return output
-    
+
     @staticmethod
     def backward(ctx, grad_output):
-        """
-        Backward pass for SwiGLU.
+        x, w_gate, w_up, gate_cache, up_cache = ctx.saved_tensors
+        grad_output = grad_output.contiguous()
         
-        Args:
-            grad_output: Gradient of loss w.r.t. output [batch_size, seq_len, intermediate_size]
+        grad_x, grad_w_gate, grad_w_up = swiglu.backward(
+            grad_output, x, w_gate, w_up, gate_cache, up_cache
+        )
         
-        Returns:
-            Gradients for (x, w_gate, w_up, b_gate, b_up)
-        """
-        x, w_gate, w_up, gate, up = ctx.saved_tensors
-        
-        if CUDA_AVAILABLE and x.is_cuda:
-            # Use fused CUDA backward kernel
-            grad_x, grad_w_gate, grad_w_up = swiglu.backward(
-                grad_output, x, w_gate, w_up, gate, up
-            )
-            # Compute bias gradients
-            grad_b_gate = grad_output.sum(dim=[0, 1]) if ctx.needs_input_grad[3] else None
-            grad_b_up = grad_output.sum(dim=[0, 1]) if ctx.needs_input_grad[4] else None
-        else:
-            # Fallback PyTorch backward
-            gate_activated = F.silu(gate)
-            
-            # Gradient through multiplication: d/d(gate_activated) and d/d(up)
-            grad_gate_activated = grad_output * up
-            grad_up = grad_output * gate_activated
-            
-            # Gradient through SiLU: d/d(gate)
-            sigmoid_gate = torch.sigmoid(gate)
-            grad_gate = grad_gate_activated * sigmoid_gate * (1 + gate * (1 - sigmoid_gate))
-            
-            # Gradients w.r.t. weights and inputs
-            grad_x_gate = grad_gate @ w_gate
-            grad_x_up = grad_up @ w_up
-            grad_x = grad_x_gate + grad_x_up
-            
-            grad_w_gate = grad_gate.transpose(-2, -1) @ x
-            grad_w_up = grad_up.transpose(-2, -1) @ x
-            
-            # Sum over batch and sequence for bias gradients
-            grad_b_gate = grad_gate.sum(dim=[0, 1]) if ctx.needs_input_grad[3] else None
-            grad_b_up = grad_up.sum(dim=[0, 1]) if ctx.needs_input_grad[4] else None
-        
-        return grad_x, grad_w_gate, grad_w_up, grad_b_gate, grad_b_up
+        # Return grads for (x, w_gate, w_up, b_gate, b_up)
+        return grad_x, grad_w_gate, grad_w_up, None, None
 
 
 class FusedSwiGLU(nn.Module):
@@ -122,7 +84,7 @@ class FusedSwiGLU(nn.Module):
         Returns:
             output: [batch_size, seq_len, intermediate_size]
         """
-        return FusedSwiGLUFunction.apply(x, self.w_gate, self.w_up, self.b_gate, self.b_up)
+        return SwiGLUFunction.apply(x, self.w_gate, self.w_up, self.b_gate, self.b_up)
     
     def extra_repr(self):
         return f'hidden_size={self.hidden_size}, intermediate_size={self.intermediate_size}, bias={self.b_gate is not None}'

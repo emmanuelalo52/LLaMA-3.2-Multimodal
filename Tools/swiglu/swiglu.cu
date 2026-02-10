@@ -30,10 +30,6 @@ __device__ __forceinline__ T silu_grad(T x, T grad_output) {
     return grad_output * sigmoid_x * (static_cast<T>(1.0) + x * (static_cast<T>(1.0) - sigmoid_x));
 }
 
-// ============================================================================
-// ATOMIC ADD WRAPPERS FOR PYTORCH TYPES
-// ============================================================================
-
 // Generic atomicAdd wrapper
 template<typename T>
 __device__ __forceinline__ void atomic_add_impl(T* address, T val) {
@@ -58,9 +54,7 @@ __device__ __forceinline__ void atomic_add_impl<c10::BFloat16>(c10::BFloat16* ad
 }
 #endif
 
-/**
- * Fused SwiGLU Forward Kernel
- */
+// Fused SwiGLU Forward Kernel
 template<typename T>
 __global__ void swiglu_forward_kernel(
     const T* __restrict__ x,
@@ -277,9 +271,8 @@ __global__ void swiglu_down_forward_kernel(
     }
 }
 
-// ============================================================================
 // HOST FUNCTIONS
-// ============================================================================
+
 
 std::vector<torch::Tensor> swiglu_forward_cuda(
     torch::Tensor x,
