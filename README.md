@@ -1541,7 +1541,7 @@ This implementation draws inspiration from:
 
 - **Issues**: [GitHub Issues](https://github.com/emmanuelalo52/LLaMA-3.2-Multimodal/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/emmanuelalo52/LLaMA-3.2-Multimodal/discussions)
-- **Email**: Your contact email here
+- **Email**: emmanuelalo52@gmail.com
 
 ---
 
@@ -1587,3 +1587,4 @@ This implementation draws inspiration from:
 ⭐ Star this repo if you find it helpful!
 
 </div>
+
