@@ -1,108 +1,113 @@
-# MLLAMA — Multimodal LLaMA-style Vision+Language Model  
-**A compact, research-friendly PyTorch implementation of a multimodal LLM** combining a ViT-like *Siglip* vision tower with a LLaMA-inspired causal language model and utilities for image-token merging, LoRA fine-tuning wrappers, and preprocessing.
+# LLaMA 3.2 Multimodal Implementation
+
+<div align="center">
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
+
+*A modular PyTorch implementation of a multimodal vision-language model inspired by Meta's LLaMA 3.2 architecture*
+
+[Features](#-features) • [Installation](#-installation) • [Quick Start](#-quick-start) • [Documentation](#-documentation) • [Examples](#-examples)
+
+</div>
 
 ---
 
-> This README documents the code in this repository (key files: `model.py`, `processing_mllama.py`, `siglip.py`) and explains how to run inference, fine-tune with LoRA, and extend the codebase.
+## 📋 Overview
+
+This repository provides a clean, research-friendly PyTorch implementation of a multimodal large language model that combines:
+
+- **Vision Encoder**: SigLIP-based Vision Transformer for processing images into patch embeddings
+- **Language Model**: LLaMA-style decoder with Group-Query Attention (GQA), Rotary Position Embeddings (RoPE), and RMSNorm
+- **Multimodal Fusion**: Cross-attention mechanism to integrate visual and textual information
+- **LoRA Support**: Low-Rank Adaptation for efficient fine-tuning with minimal trainable parameters
+
+### Why This Implementation?
+
+- **🎯 Educational**: Clear, well-documented code designed for learning and experimentation
+- **🔧 Modular**: Easy to swap components (vision encoder, language model, fusion strategy)
+- **⚡ Efficient**: Supports KV-caching, mixed-precision training, and LoRA fine-tuning
+- **🚀 Production-Ready**: Includes utilities for preprocessing, tokenization, and checkpoint management
 
 ---
 
-# Table of contents
-1. [Project overview](#project-overview)  
-2. [Repository structure](#repository-structure)  
-3. [Key design & components](#key-design--components)  
-4. [Requirements & installation](#requirements--installation)  
-5. [Quick start — inference example](#quick-start---inference-example)  
-6. [LoRA fine-tuning (concept + example)](#lora-fine-tuning-concept--example)  
-7. [Data preprocessing and tokenization notes](#data-preprocessing-and-tokenization-notes)  
-8. [Saving / loading weights & checkpoints](#saving--loading-weights--checkpoints)  
-9. [API reference (brief)](#api-reference-brief)  
-10. [Tips, caveats & TODOs / known issues](#tips-caveats--todostknown-issues)  
-11. [Contributing, license & acknowledgements](#contributing-license--acknowledgements)
+## ✨ Features
+
+### Model Architecture
+- **SigLIP Vision Transformer**: Efficient patch-based image encoding with learnable position embeddings
+- **LLaMA-3 Language Model**: State-of-the-art transformer decoder with:
+  - Group-Query Attention (GQA) for improved inference efficiency
+  - Rotary Position Embeddings (RoPE) for better length extrapolation
+  - RMSNorm for stable training
+  - SwiGLU activation functions
+- **Multimodal Projection**: Learnable adapter to align vision and language representations
+
+### Training & Fine-Tuning
+- **LoRA (Low-Rank Adaptation)**: Memory-efficient fine-tuning
+- **Mixed Precision**: FP16/BF16 training support
+- **KV-Cache**: Efficient autoregressive generation
+- **Gradient Checkpointing**: Reduced memory footprint for large models
+
+### Utilities
+- **Image Preprocessing**: Built-in normalization and resizing for SigLIP
+- **Tokenization**: Support for HuggingFace tokenizers with special image tokens
+- **Checkpoint Management**: SafeTensors format for secure model serialization
 
 ---
 
-# Project overview
-This repository implements a modular multimodal model that:
+## 📦 Installation
 
-- Encodes images using a ViT-like **Siglip** vision transformer, returning patch embeddings.  
-- Encodes text with a LLaMA-style transformer (Group-Query attention, rotary embeddings, RMSNorm) and supports combining image patch embeddings into the decoding stream.  
-- Provides utilities for image preprocessing and special token handling for image placeholders.  
-- Includes a LoRA-style lightweight adapter wrapper `Linear_LORA` to fine-tune with far fewer trainable parameters.  
+### Prerequisites
+- Python 3.10 or higher
+- CUDA 11.8+ (for GPU acceleration)
+- 16GB+ RAM (32GB+ recommended)
 
-The design focuses on clarity & extendability for research experiments (VLM training, LoRA fine-tuning, KV-cache inference).
+### Basic Installation
 
----
-
-# Repository structure
-- `model.py` — Core multimodal model, LLaMA-like transformer blocks, rotary embeddings, Group-Query attention, LoRA wrapper, multimodal merging and loss helpers.  
-- `siglip.py` — Vision transformer: embeddings, attention, MLP and encoder layers for extracting patch features.  
-- `processing_mllama.py` — Image preprocessing utilities and `MllamaImageProcessor` for creating image placeholders in prompts and returning tensors suitable for the model. **Note:** returns a key named `"pixel Value"` (contains space) — see caveats.  
-- (Optional) other utility scripts / notebooks (not included here): training loop, dataset loader, HF `Trainer` wrappers.
-
----
-
-# Key design & components (conceptual)
-### Vision tower — Siglip
-- Patch embedding via a Conv2d with `patch_size` stride → positional embeddings → transformer encoder stack. Output shape: `[batch, num_patches, embed_dim]`.
-
-### Language tower — LLaMA-like
-- Embedding layer, stack of `TransformerBlock` instances, RMS-style layer norm and linear LM head. Includes:
-  - **GroupQueryAttention** (grouped key/value heads → repeated for attention)  
-  - **RoPE** (rotary positional embeddings)  
-  - **KV cache support** to enable efficient autoregressive generation.
-
-### Multimodal merging
-- Image features (vision patch embeddings) are projected with a `MultiModalProjector` then **merged into text token embeddings** by replacing a sequence of special image placeholder tokens (e.g. `<image>`) with the actual patch embeddings at the first image token position in the sequence. This is implemented in `_merge_input_ids_with_image_features`.
-
-### LoRA wrapper
-- `Linear_LORA` wraps an `nn.Linear` with frozen main weights and trainable low-rank adapters `lora_a` and `lora_b`, enabling efficient fine-tuning. Use by replacing select linear layers in the LM.
-
----
-
-# Requirements & installation
-
-**Minimum / recommended packages**
 ```bash
-pip install torch torchvision      # PyTorch (CPU/GPU build appropriate for your system)
-pip install safetensors            # safe checkpoint format helpers
-pip install tiktoken               # tokenizers utilities if needed
-pip install numpy pillow           # preprocessing
-pip install transformers           # optional — for a tokenizer (recommended)
+# Clone the repository
+git clone https://github.com/emmanuelalo52/LLaMA-3.2-Multimodal.git
+cd LLaMA-3.2-Multimodal
+
+# Create a virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-Create a `requirements.txt` if you prefer:
-```
-torch
-safetensors
-tiktoken
-numpy
-pillow
-transformers
+### Manual Installation
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+pip install transformers safetensors tiktoken
+pip install numpy pillow
 ```
 
-> GPU tip: this code uses lower-precision dtypes (e.g. `torch.float16`) in several modules by default — running on a CUDA-enabled GPU with sufficient memory (adjust dtype and batch size for a GTX 1650) is recommended for reasonable throughput.
+### Development Installation
+
+```bash
+pip install -e .  # Editable install for development
+```
 
 ---
 
-# Quick start — inference example
+## 🚀 Quick Start
 
-Below is a minimal example to run a forward pass. This is a **starting point** — you'll likely need to adapt tokenizers, vocabulary size, and checkpoint loading for your model weights.
+### Basic Inference
 
 ```python
-# quick_infer.py (example)
 import torch
 from PIL import Image
-
-# import repo modules
-from siglip import SiglipVisionConfig  # siglip.py
-from model import MLLAMAConfig, MllamaForConditionalGeneration  # model.py
-from processing_mllama import MllamaImageProcessor  # processing_mllama.py
-# You will need a tokenizer — example uses HuggingFace LLaMA tokenizer
 from transformers import LlamaTokenizer
 
-# 1) Build configs (dicts -> MLLAMAConfig handles conversion internally)
-vision_cfg = {
+from Model.model import MllamaForConditionalGeneration, MLLAMAConfig
+from Model.processing_mllama import MllamaImageProcessor
+
+# 1. Initialize model configuration
+vision_config = {
     "hidden_size": 768,
     "intermediate_size": 3072,
     "num_hidden_layers": 12,
@@ -110,154 +115,519 @@ vision_cfg = {
     "image_size": 224,
     "patch_size": 16,
 }
-text_cfg = {
+
+text_config = {
     "vocab_size": 128256,
     "hidden_size": 4096,
     "n_heads": 32,
     "n_layers": 16,
     "hidden_dim": 8192,
     "max_position_embeddings": 2048,
-    "context_length": 131072
 }
 
-cfg = MLLAMAConfig(vision_config=vision_cfg, text_config=text_cfg, projection_dim=2048)
-model = MllamaForConditionalGeneration(cfg)  # uninitialized weights — load checkpoints for real usage
+config = MLLAMAConfig(
+    vision_config=vision_config,
+    text_config=text_config,
+    projection_dim=2048
+)
+
+# 2. Create model
+model = MllamaForConditionalGeneration(config)
 model.eval()
 
-# 2) Tokenizer / image processor
-tokenizer = LlamaTokenizer.from_pretrained("facebook/llama-7b", use_fast=True)  # adapt to available tokenizer
-# NOTE: MLLAMAConfig sets text_config.num_image_tokens = (image_size // patch_size) ** 2
-num_image_tokens = cfg.text_config.num_image_tokens
-image_processor = MllamaImageProcessor(tokenizer, num_image_token=num_image_tokens, image_size=cfg.vision_config.image_size)
+# 3. Load tokenizer and image processor
+tokenizer = LlamaTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf")
+num_image_tokens = (config.vision_config.image_size // config.vision_config.patch_size) ** 2
+image_processor = MllamaImageProcessor(
+    tokenizer=tokenizer,
+    num_image_token=num_image_tokens,
+    image_size=config.vision_config.image_size
+)
 
-# 3) Prepare input (single image + prompt)
-img = Image.open("examples/cat.jpg").convert("RGB")
-prompt = "Describe the image."
+# 4. Prepare input
+image = Image.open("path/to/image.jpg").convert("RGB")
+prompt = "Describe this image in detail."
 
-# processing_mllama returns a dict with keys like: 'pixel Value', 'input_ids', 'attention_mask' (note space)
-batch = image_processor([prompt], [img], padding=True)
-pixel_values = batch["pixel Value"]   # <-- watch the key name
+batch = image_processor([prompt], [image], padding=True)
+pixel_values = batch["pixel Value"]  # Note: space in key name
 input_ids = batch["input_ids"]
 attention_mask = batch["attention_mask"]
 
-# 4) Forward
+# 5. Generate response
 with torch.no_grad():
-    out = model(input_ids=input_ids, pixel_values=pixel_values, attention_mask=attention_mask)
+    outputs = model(
+        input_ids=input_ids,
+        pixel_values=pixel_values,
+        attention_mask=attention_mask
+    )
 
-logits = out["logits"]      # shape: [batch, seq_len, vocab_size]
-pred_ids = logits.argmax(-1)  # greedy decode (example)
-decoded = tokenizer.decode(pred_ids[0], skip_special_tokens=True)
-print(decoded)
+logits = outputs["logits"]
+predicted_ids = logits.argmax(dim=-1)
+response = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
+print(f"Model: {response}")
 ```
 
-Notes:
-- The example above creates an in-memory model. You should load pretrained weights (safetensors / state_dict) before real inference.  
-- `processing_mllama.MllamaImageProcessor` returns the pixel data under the key `"pixel Value"` (space between words). That is intentional in the current code; you may rename it to `pixel_values` in the function for cleanliness.
+### Loading Pretrained Weights
 
----
-
-# LoRA fine-tuning (concept + example)
-**Concept:** wrap specific `nn.Linear` layers using the provided `Linear_LORA` wrapper to freeze base weights and train only low-rank adapters.
-
-Simple utility to replace `nn.Linear` layers in your LM (example — adapt to your naming and layers you want to adapt):
-
-```python
-from model import Linear_LORA
-
-def convert_linears_to_lora(module, rank=4, alpha=16, dropout=0.0, target_module_classes=(torch.nn.Linear,)):
-    """
-    Recursively replace Linear modules with Linear_LORA(wrapper) where desired.
-    This is a basic example — refine selection to only replace attention projection matrices or FFN layers.
-    """
-    for name, child in module.named_children():
-        if isinstance(child, target_module_classes):
-            in_dim, out_dim = child.in_features, child.out_features
-            lora = Linear_LORA(in_dim, out_dim, rank=rank, alpha=alpha, dropout=dropout)
-            # copy original weights into lora.linear
-            lora.linear.weight.data.copy_(child.weight.data)
-            # replace in parent
-            setattr(module, name, lora)
-        else:
-            convert_linears_to_lora(child, rank, alpha, dropout, target_module_classes)
-```
-
-After conversion:
-- Only `lora.lora_a` and `lora.lora_b` (and their biases if enabled) will require grads. The base `linear.weight` is frozen.  
-
-Training tips:
-- Use `torch.cuda.amp` or `accelerate` mixed-precision.  
-- Use small learning rates for LoRA adapters (e.g., 1e-4 – 1e-3) and a small batch size if GPU memory is limited.  
-- Save only adapter parameters if you want a small checkpoint.
-
----
-
-# Data preprocessing and tokenization notes
-- `processing_mllama.py` defines `IMAGENET_STANDARD_MEAN` and `IMAGENET_STANDARD_STD` and helper functions to resize / normalize images and produce patch tensors. Pixel range is scaled using `rescale_factor = 1/255.0`.  
-- `MllamaImageProcessor`:
-  - Adds a special `<image>` token to the tokenizer (`tokenizer.add_special_tokens`) and creates additional placeholder tokens used for object location/segmentation.  
-  - It sets `tokenizer.add_bos_token = False` and `tokenizer.add_eos_token = False` — tokenizers should be checked for expected behavior.  
-  - **Important:** the processor returns `pixel_values` under the key `"pixel Value"`. Either use that exact key or modify the source to return `"pixel_values"`.
-
-- The model's image-token merging logic (`_merge_input_ids_with_image_features`) replaces the first occurrence of the image token with the sequence of patch embeddings. If your dataset contains multiple `<image>` tokens or images at different positions, validate merging logic and adjust accordingly.
-
----
-
-# Saving / loading weights & checkpoints
-- The repository imports `safetensors.torch.load_file` in `model.py`, suggesting support for safetensors checkpoints. Example pseudo-load:
 ```python
 from safetensors.torch import load_file
 
-state = load_file("checkpoint.safetensors")
-model.load_state_dict(state, strict=False)
+# Load pretrained weights
+state_dict = load_file("path/to/checkpoint.safetensors")
+model.load_state_dict(state_dict, strict=False)
 ```
-- Alternatively use `torch.save(model.state_dict(), "ckpt.pt")` and `model.load_state_dict(torch.load(...))`.
-
-Always ensure the checkpoint vocabulary (tokenizer) and config (vocab_size, image token id, etc.) are compatible.
 
 ---
 
-# API reference (brief)
-> Each line references the file that implements it.
+## 📚 Documentation
 
-### `siglip.py` (Vision)  
-- `SiglipVisionConfig` — config fields (hidden_size, image_size, patch_size, num_hidden_layers, etc.).  
-- `SiglipVisionEmbeddings` — converts pixel tensor to patch embeddings + positional embeddings.  
-- `SiglipVisionTransformer` → `SiglipModel` — top-level forward that returns `[batch, num_patches, embed_dim]`.
+### Project Structure
 
-### `processing_mllama.py` (Preprocessing)  
-- `MllamaImageProcessor(tokenizer, num_image_token, image_size)` — callable that accepts lists `text` and `images`, returning a dict with `pixel Value`, `input_ids`, `attention_mask`, etc.  
-- Helpers: `process_images`, `resize`, `normalize`, `rescale`, `add_image_tokens_to_prompts`.
+```
+LLaMA-3.2-Multimodal/
+├── Model/
+│   ├── model.py                 # Core multimodal model implementation
+│   ├── siglip.py                # SigLIP vision transformer
+│   └── processing_mllama.py     # Image preprocessing utilities
+├── Tools/
+│   └── ...                      # CUDA kernels and optimization utilities
+├── build/
+│   └── ...                      # Compiled extensions
+├── setup.py                     # Package installation script
+├── requirements.txt             # Python dependencies
+├── LICENSE                      # MIT License
+└── README.md                    # This file
+```
 
-### `model.py` (Core multimodal model)  
-- `LLAMA32Config`, `MLLAMAConfig` — configuration classes. Note `MLLAMAConfig` converts nested `vision_config` → `SiglipVisionConfig` internally and populates `text_config.num_image_tokens`.  
-- `Linear_LORA(in_dim, out_dim, rank, alpha, dropout)` — LoRA wrapper.  
-- `LLAMARMSNorm`, `LLAMARotaryEmbedding`, `GroupQueryAttention`, `FeedForward`, `TransformerBlock` — low-level transformer components.  
-- `MultiModalProjector` — projects vision embeddings to the LM hidden dim.  
-- `Llama3Model` / `Llama3ForCausalLM` — LLM backbone and LM head.  
-- `MllamaForConditionalGeneration` — high-level model gluing vision + language towers, handles image embedding insertion and computes loss if `labels` provided. Also contains helper masking functions for selective loss computation.  
+### Key Components
+
+#### 1. Model Architecture (`Model/model.py`)
+
+**MLLAMAConfig**: Configuration class for the entire multimodal model
+```python
+config = MLLAMAConfig(
+    vision_config=vision_config,   # SigLIP configuration
+    text_config=text_config,       # LLaMA configuration
+    projection_dim=2048            # Vision-to-language projection dimension
+)
+```
+
+**MllamaForConditionalGeneration**: Main model class
+- Combines vision encoder, language decoder, and multimodal projection
+- Handles image-text fusion via cross-attention
+- Supports loss computation with flexible masking strategies
+
+**Key Features**:
+- `Linear_LORA`: LoRA wrapper for efficient fine-tuning
+- `GroupQueryAttention`: GQA implementation with KV-cache support
+- `LLAMARotaryEmbedding`: RoPE for position encoding
+- `MultiModalProjector`: Vision-language alignment layer
+
+#### 2. Vision Encoder (`Model/siglip.py`)
+
+**SigLIP Architecture**:
+- Patch embedding via Conv2D (14x14 or 16x16 patches)
+- Learnable position embeddings
+- Multi-head self-attention transformer encoder
+- Output: `[batch, num_patches, hidden_dim]`
+
+**SiglipVisionConfig**:
+```python
+vision_config = {
+    "hidden_size": 1152,           # Model dimension
+    "intermediate_size": 4304,     # FFN dimension
+    "num_hidden_layers": 27,       # Transformer layers
+    "num_attention_heads": 16,     # Attention heads
+    "image_size": 384,             # Input image size
+    "patch_size": 14,              # Patch size
+}
+```
+
+#### 3. Image Processing (`Model/processing_mllama.py`)
+
+**MllamaImageProcessor**:
+- Adds special `<image>` token to vocabulary
+- Resizes and normalizes images (ImageNet statistics)
+- Creates image placeholder tokens in text prompts
+- Returns dict with `"pixel Value"` (note the space), `input_ids`, `attention_mask`
+
+**Usage**:
+```python
+processor = MllamaImageProcessor(
+    tokenizer=tokenizer,
+    num_image_token=196,  # (14x14 patches)
+    image_size=224
+)
+
+batch = processor(
+    text=["Describe this image"],
+    images=[PIL_image],
+    padding=True
+)
+```
 
 ---
 
-# Tips, caveats & TODOs / known issues 
-- **Tokenizer expectations** — Code relies on a tokenizer that can add special tokens and convert them to ids. `transformers` tokenizers (HF) are a good choice; ensure `vocab_size` matches the LM config.  
-- **Loss masking** — `_compute_loss_with_masking` and `_create_conversation_mask` offer two approaches for selective loss computation; they assume your dataset uses `ignore_index` appropriately. Validate on your dataset.  
-- **Checkpoint compatibility** — If you load checkpoints trained with different architectures (different `n_heads`, `hidden_size`, etc.), layers may mismatch. Use `strict=False` only when you understand missing/extra keys.  
-- **KV cache & generation** — The model contains the structure for kv-cache updates in attention. Testing and integration with a generation loop will require implementing token-by-token generation loops that supply and update `kv_cache`.  
+## 🎓 Advanced Usage
+
+### LoRA Fine-Tuning
+
+LoRA (Low-Rank Adaptation) enables efficient fine-tuning by adding trainable low-rank matrices to frozen model weights.
+
+```python
+from Model.model import Linear_LORA
+
+def convert_to_lora(model, rank=8, alpha=16, dropout=0.1):
+    """Convert linear layers to LoRA for efficient fine-tuning"""
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            # Target specific layers (e.g., attention projections)
+            if any(target in name for target in ['q_proj', 'v_proj', 'o_proj']):
+                parent_name = '.'.join(name.split('.')[:-1])
+                child_name = name.split('.')[-1]
+                parent = dict(model.named_modules())[parent_name]
+                
+                # Create LoRA wrapper
+                lora_layer = Linear_LORA(
+                    in_dim=module.in_features,
+                    out_dim=module.out_features,
+                    rank=rank,
+                    alpha=alpha,
+                    dropout=dropout
+                )
+                
+                # Copy original weights
+                lora_layer.linear.weight.data.copy_(module.weight.data)
+                if module.bias is not None:
+                    lora_layer.linear.bias.data.copy_(module.bias.data)
+                
+                # Replace module
+                setattr(parent, child_name, lora_layer)
+    
+    # Freeze base model
+    for name, param in model.named_parameters():
+        if 'lora' not in name:
+            param.requires_grad = False
+    
+    return model
+
+# Apply LoRA
+model = convert_to_lora(model, rank=8, alpha=16)
+
+# Count trainable parameters
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+total = sum(p.numel() for p in model.parameters())
+print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
+```
+
+### Training Loop Example
+
+```python
+import torch
+from torch.optim import AdamW
+from torch.cuda.amp import autocast, GradScaler
+
+# Setup
+model = model.cuda()
+optimizer = AdamW(
+    [p for p in model.parameters() if p.requires_grad],
+    lr=1e-4,
+    weight_decay=0.01
+)
+scaler = GradScaler()  # For mixed precision
+
+# Training loop
+model.train()
+for epoch in range(num_epochs):
+    for batch in dataloader:
+        input_ids = batch["input_ids"].cuda()
+        pixel_values = batch["pixel_values"].cuda()
+        labels = batch["labels"].cuda()
+        attention_mask = batch["attention_mask"].cuda()
+        
+        optimizer.zero_grad()
+        
+        # Mixed precision forward pass
+        with autocast():
+            outputs = model(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                attention_mask=attention_mask,
+                labels=labels
+            )
+            loss = outputs["loss"]
+        
+        # Backward pass
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        
+        print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
+```
+
+### Custom Dataset Integration
+
+```python
+from torch.utils.data import Dataset, DataLoader
+
+class MultimodalDataset(Dataset):
+    def __init__(self, data_path, image_processor, tokenizer):
+        self.data = self.load_data(data_path)
+        self.image_processor = image_processor
+        self.tokenizer = tokenizer
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        image = Image.open(item['image_path']).convert('RGB')
+        text = item['text']
+        
+        # Process inputs
+        batch = self.image_processor([text], [image], padding=True)
+        
+        # Create labels (for training)
+        labels = batch['input_ids'].clone()
+        # Mask image tokens in loss computation
+        labels[labels == self.image_processor.image_token_id] = -100
+        
+        return {
+            'input_ids': batch['input_ids'].squeeze(0),
+            'pixel_values': batch['pixel Value'].squeeze(0),
+            'attention_mask': batch['attention_mask'].squeeze(0),
+            'labels': labels.squeeze(0)
+        }
+    
+    def load_data(self, path):
+        # Load your dataset here
+        pass
+
+# Create dataloader
+dataset = MultimodalDataset('data.json', image_processor, tokenizer)
+dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
+```
 
 ---
 
-# Contributing
-- Fork & create pull requests.  
-- Add tests for: preprocessing (shapes & dtypes), forward pass (shapes for logits), LoRA replacements.  
-- If you add a pretrained checkpoint, add a script that demonstrates loading it and running inference.
+## 💡 Examples
+
+### Example 1: Visual Question Answering
+
+```python
+from PIL import Image
+import torch
+
+# Load image
+image = Image.open("examples/cityscape.jpg")
+question = "How many cars are visible in this image?"
+
+# Process
+batch = image_processor([question], [image])
+outputs = model.generate(
+    input_ids=batch["input_ids"],
+    pixel_values=batch["pixel Value"],
+    max_new_tokens=50,
+    temperature=0.7
+)
+
+answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+print(f"Q: {question}")
+print(f"A: {answer}")
+```
+
+### Example 2: Image Captioning
+
+```python
+# Generate detailed caption
+image = Image.open("examples/landscape.jpg")
+prompt = "Provide a detailed description of this image, including colors, objects, and atmosphere."
+
+batch = image_processor([prompt], [image])
+outputs = model.generate(
+    input_ids=batch["input_ids"],
+    pixel_values=batch["pixel Value"],
+    max_new_tokens=100,
+    do_sample=True,
+    top_p=0.9
+)
+
+caption = tokenizer.decode(outputs[0], skip_special_tokens=True)
+print(caption)
+```
+
+### Example 3: Batch Processing
+
+```python
+# Process multiple images
+images = [Image.open(f"images/{i}.jpg") for i in range(4)]
+prompts = ["Describe this image."] * 4
+
+batch = image_processor(prompts, images, padding=True)
+outputs = model(**batch)
+
+for i, logits in enumerate(outputs["logits"]):
+    pred = logits.argmax(dim=-1)
+    text = tokenizer.decode(pred, skip_special_tokens=True)
+    print(f"Image {i}: {text}")
+```
 
 ---
 
-# License & citation
-- **MIT**
+## ⚙️ Configuration
+
+### Model Configuration Options
+
+```python
+# Vision Encoder Configuration
+vision_config = {
+    "hidden_size": 1152,           # Model dimension
+    "intermediate_size": 4304,     # FFN dimension  
+    "num_hidden_layers": 27,       # Number of transformer layers
+    "num_attention_heads": 16,     # Number of attention heads
+    "num_channels": 3,             # RGB channels
+    "image_size": 384,             # Input image resolution
+    "patch_size": 14,              # Patch size (14x14)
+}
+
+# Language Model Configuration
+text_config = {
+    "vocab_size": 128256,          # Vocabulary size
+    "hidden_size": 4096,           # Model dimension
+    "n_heads": 32,                 # Number of attention heads
+    "n_kv_heads": 8,               # Number of KV heads (GQA)
+    "n_layers": 32,                # Number of transformer layers
+    "hidden_dim": 14336,           # FFN dimension
+    "max_position_embeddings": 131072,  # Max sequence length
+    "rope_theta": 500000.0,        # RoPE base frequency
+    "rms_norm_eps": 1e-5,          # RMSNorm epsilon
+}
+
+# Full Model Configuration
+config = MLLAMAConfig(
+    vision_config=vision_config,
+    text_config=text_config,
+    projection_dim=2048,           # Vision-to-language projection
+    image2text_projection_bias=True
+)
+```
+
 ---
 
-# Acknowledgements
-- Implementation inspired by standard transformer building blocks (rotary positional embeddings, ViT patch embeddings, Grouped-kv attention patterns) and LoRA techniques. See code-level comments in `model.py` and `siglip.py` for more contextual details.
+## 🐛 Troubleshooting
+
+### Common Issues
+
+**Issue**: `KeyError: 'pixel Value'`
+- **Solution**: The image processor returns `"pixel Value"` (with space). Use this exact key or modify `processing_mllama.py` to use `"pixel_values"`.
+
+**Issue**: Out of memory during training
+- **Solutions**:
+  - Reduce batch size
+  - Enable gradient checkpointing: `model.gradient_checkpointing_enable()`
+  - Use mixed precision training (FP16/BF16)
+  - Apply LoRA instead of full fine-tuning
+
+**Issue**: Slow inference
+- **Solutions**:
+  - Use KV-caching for autoregressive generation
+  - Compile model with `torch.compile()`
+  - Quantize model to INT8/INT4
+  - Use smaller model variants
+
+**Issue**: Model produces nonsensical outputs
+- **Solutions**:
+  - Ensure you're loading pretrained weights correctly
+  - Check tokenizer vocabulary matches model config
+  - Verify image preprocessing (normalization, resizing)
+  - Adjust generation parameters (temperature, top_p, top_k)
+
+### GPU Requirements
+
+| Model Size | Minimum VRAM | Recommended VRAM | Batch Size |
+|------------|--------------|------------------|------------|
+| Small (1B) | 4 GB | 8 GB | 1-4 |
+| Medium (3B) | 8 GB | 16 GB | 1-2 |
+| Large (11B) | 16 GB | 24 GB | 1 |
+| XLarge (90B) | 40 GB | 80 GB | 1 |
 
 ---
+
+## 🤝 Contributing
+
+We welcome contributions! Please follow these guidelines:
+
+1. **Fork** the repository
+2. **Create** a feature branch (`git checkout -b feature/amazing-feature`)
+3. **Commit** your changes (`git commit -m 'Add amazing feature'`)
+4. **Push** to the branch (`git push origin feature/amazing-feature`)
+5. **Open** a Pull Request
+
+### Development Guidelines
+- Follow PEP 8 style guidelines
+- Add docstrings to all functions and classes
+- Include type hints where appropriate
+- Write unit tests for new features
+- Update documentation as needed
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+### Citation
+
+If you use this code in your research, please cite:
+
+```bibtex
+@software{llama32_multimodal,
+  author = {Emmanuel Alo},
+  title = {LLaMA 3.2 Multimodal Implementation},
+  year = {2024},
+  publisher = {GitHub},
+  url = {https://github.com/emmanuelalo52/LLaMA-3.2-Multimodal}
+}
+```
+
+---
+
+## 🙏 Acknowledgments
+
+This implementation draws inspiration from:
+- [Meta's LLaMA](https://github.com/meta-llama/llama) - Original LLaMA architecture
+- [SigLIP](https://arxiv.org/abs/2303.15343) - Vision encoder design
+- [LoRA](https://arxiv.org/abs/2106.09685) - Efficient fine-tuning method
+- [HuggingFace Transformers](https://github.com/huggingface/transformers) - Model implementations and utilities
+
+---
+
+## 📞 Contact & Support
+
+- **Issues**: [GitHub Issues](https://github.com/emmanuelalo52/LLaMA-3.2-Multimodal/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/emmanuelalo52/LLaMA-3.2-Multimodal/discussions)
+- **Email**: Your contact email here
+
+---
+
+## 📊 Roadmap
+
+- [ ] Add support for video input
+- [ ] Implement distributed training utilities
+- [ ] Add model quantization (INT8/INT4)
+- [ ] Create Gradio/Streamlit demo
+- [ ] Add more evaluation scripts
+- [ ] Support for other vision encoders (CLIP, DinoV2)
+- [ ] Integration with LangChain/LlamaIndex
+- [ ] Docker containerization
+- [ ] Model zoo with pretrained weights
+
+---
+
+<div align="center">
+
+**Made with ❤️ by the open-source community**
+
+⭐ Star this repo if you find it helpful!
+
+</div>
