@@ -10,6 +10,7 @@ import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 from siglip import SiglipVisionConfig,SiglipModel
 import rmsnorm
+from ..Tools.swiglu.FusedSwiglu import FusedSwiGLU
 class KVCache():
 
     def __init__(self):
@@ -244,17 +245,18 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
 
 
 # Feed forward
-class FeedForward(nn.Module):
-    def __init__(self,config:LLAMA32Config):
+class FusedFeedforward(nn.Module):
+    def __init__(self,hidden_size,intermediate_size,bias=False):
         super().__init__()
-        self.fc1 = nn.Linear(config.hidden_size, config.hidden_dim, dtype=config.dtype, bias=False)
-        self.fc2 = nn.Linear(config.hidden_size, config.hidden_dim, dtype=config.dtype, bias=False)
-        self.fc3 = nn.Linear(config.hidden_dim, config.hidden_size, dtype=config.dtype, bias=False)
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.swiglu = FusedSwiGLU(hidden_size,intermediate_size,bias=bias)
+        self.w_down = nn.Linear(intermediate_size,hidden_size,bias=bias)
+
     def forward(self,x):
-        fc1 = self.fc1(x)
-        fc2 = self.fc2(x)
-        x = Functional.silu(fc1) * fc2 
-        return self.fc3(x)
+        intermediate = self.swiglu(x)
+        output = self.w_down(intermediate)
+        return output
     
     
 #Group Query attention with KV cache
