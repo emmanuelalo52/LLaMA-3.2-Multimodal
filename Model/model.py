@@ -329,7 +329,7 @@ class TransformerBlock(nn.Module):
         self.att = GroupQueryAttention(config, layer_idx=layer_idx, dtype=config.dtype)
         self.norm1 = LLAMARMSNorm(dim=config.hidden_size, eps=config.rms_norm_eps) 
         self.norm2 = LLAMARMSNorm(dim=config.hidden_size, eps=config.rms_norm_eps)
-        self.ff = FeedForward(config)
+        self.ff = FusedFeedforward(config)
 
     def forward(self, hidden_states, attention_mask=None, position_ids=None, kv_cache=None):
         # 1. Self Attention with Fused Add-RMSNorm
