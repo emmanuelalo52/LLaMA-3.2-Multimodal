@@ -1,12 +1,3 @@
-<<<<<<< HEAD
-from PIL import Image
-import torch
-import fire
-
-from ..Model.processing_mllama import MllamaImageProcessor
-from ..Model.model import KVCache,MllamaForConditionalGeneration
-
-=======
 import argparse
 from pathlib import Path
 
@@ -49,6 +40,7 @@ def build_default_config():
 def load_checkpoint_if_available(model, checkpoint_path):
     if checkpoint_path is None:
         return
+
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -85,7 +77,10 @@ def run(args):
 
     input_ids = batch["input_ids"].to(device)
     attention_mask = batch["attention_mask"].to(device)
-    pixel_values = batch["pixel_value"].to(device=device, dtype=model.language_model.model.tok_emb.weight.dtype)
+    pixel_values = batch["pixel_value"].to(
+        device=device,
+        dtype=model.language_model.model.tok_emb.weight.dtype,
+    )
 
     with torch.no_grad():
         outputs = model(
@@ -109,4 +104,3 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", default=None, help="Optional .pt checkpoint path")
     parser.add_argument("--cpu", action="store_true", help="Force CPU")
     run(parser.parse_args())
->>>>>>> d672be6e3d4a6d1ba57865815bda29658ae896ac
