@@ -462,6 +462,10 @@ class Llama3ForCausalLM(nn.Module):
         logits = self.lm_head(outputs)
         return logits, kv_cache
 
+    def tie_weights(self):
+        # Keep output head tied with token embeddings, matching HF causal LM behavior.
+        self.lm_head.weight = self.model.tok_emb.weight
+
 class MllamaForConditionalGeneration(nn.Module):
     def __init__(self, config: MLLAMAConfig):
         super().__init__()
@@ -485,6 +489,9 @@ class MllamaForConditionalGeneration(nn.Module):
     def post_init(self):
         """Initialize weights properly"""
         pass
+
+    def tie_weights(self):
+        self.language_model.tie_weights()
     
     def get_input_embeddings(self):
         return self.language_model.model.tok_emb
