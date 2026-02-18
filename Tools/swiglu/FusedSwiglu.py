@@ -4,25 +4,27 @@ import torch.nn.functional as F
 
 # Try to import the compiled CUDA extension
 try:
-    import swiglu
+    import swiglu_fused as swiglu
     CUDA_AVAILABLE = True
 except ImportError:
     CUDA_AVAILABLE = False
-    print("Warning: swiglu_fused CUDA extension not found. Falling back to PyTorch implementation.")
-    print("To compile: python setup.py install")
+    swiglu = None
 
 
 class SwiGLUFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, w_gate, w_up, b_gate=None, b_up=None):
-        # Kernel expects contiguous tensors
+        if not CUDA_AVAILABLE or (not x.is_cuda):
+            gate = F.linear(x, w_gate, b_gate)
+            up = F.linear(x, w_up, b_up)
+            return F.silu(gate) * up
+
         x = x.contiguous()
         w_gate = w_gate.contiguous()
         w_up = w_up.contiguous()
-        
-        # Extension returns (output, gate_cache, up_cache)
+
         output, gate_cache, up_cache = swiglu.forward(x, w_gate, w_up, b_gate, b_up)
-        
+
         ctx.save_for_backward(x, w_gate, w_up, gate_cache, up_cache)
         return output
 
@@ -30,12 +32,11 @@ class SwiGLUFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         x, w_gate, w_up, gate_cache, up_cache = ctx.saved_tensors
         grad_output = grad_output.contiguous()
-        
+
         grad_x, grad_w_gate, grad_w_up = swiglu.backward(
             grad_output, x, w_gate, w_up, gate_cache, up_cache
         )
-        
-        # Return grads for (x, w_gate, w_up, b_gate, b_up)
+
         return grad_x, grad_w_gate, grad_w_up, None, None
 
 

@@ -49,7 +49,7 @@ class MllamaImageProcessor:
         self.image_seq_length = num_image_token
         self.image_size = image_size
 
-        tokens_to_add = {"additional_special tokens":[self.IMAGE_TOKEN]}
+        tokens_to_add = {"additional_special_tokens":[self.IMAGE_TOKEN]}
         tokenizer.add_special_tokens(tokens_to_add)
 
         EXTRA_TOKENS = [f"<loc{i:04d}>" for i in range(1024)] # These are object detection tokens
