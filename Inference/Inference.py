@@ -1,106 +1,128 @@
 import argparse
 from pathlib import Path
+from typing import List
 
 import torch
 from PIL import Image
-from transformers import AutoTokenizer
-
-from Model.model import MLLAMAConfig, MllamaForConditionalGeneration
-from Model.processing_mllama import MllamaImageProcessor
+from transformers import AutoProcessor, MllamaForConditionalGeneration
 
 
-def build_default_config():
-    vision_config = {
-        "hidden_size": 768,
-        "intermediate_size": 3072,
-        "num_hidden_layers": 12,
-        "num_attention_heads": 12,
-        "image_size": 224,
-        "patch_size": 16,
+DEFAULT_MODEL = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run inference with Llama 3.2 Vision weights from Hugging Face.",
+    )
+    parser.add_argument("--image", required=True, help="Path to the input image.")
+    parser.add_argument("--prompt", required=True, help="Prompt/question for the model.")
+    parser.add_argument(
+        "--model-id",
+        default=DEFAULT_MODEL,
+        help="Hugging Face model id (must be a Llama 3.2 Vision checkpoint).",
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=128,
+        help="Maximum number of tokens to generate.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature. Use 0.0 for greedy decoding.",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=1.0,
+        help="Top-p sampling value when temperature > 0.",
+    )
+    parser.add_argument(
+        "--cpu",
+        action="store_true",
+        help="Force CPU inference even when CUDA is available.",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=["auto", "float16", "bfloat16", "float32"],
+        default="auto",
+        help="Model dtype to request from Transformers.",
+    )
+    return parser.parse_args()
+
+
+def resolve_dtype(dtype_name: str) -> torch.dtype | str:
+    if dtype_name == "auto":
+        return "auto"
+    if dtype_name == "float16":
+        return torch.float16
+    if dtype_name == "bfloat16":
+        return torch.bfloat16
+    return torch.float32
+
+
+def build_messages(prompt: str) -> List[dict]:
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+
+
+def load_image(path: str) -> Image.Image:
+    image_path = Path(path)
+    if not image_path.exists():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+    return Image.open(image_path).convert("RGB")
+
+
+def run_inference(args: argparse.Namespace) -> str:
+    device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
+    torch_dtype = resolve_dtype(args.dtype)
+
+    model = MllamaForConditionalGeneration.from_pretrained(
+        args.model_id,
+        torch_dtype=torch_dtype,
+        device_map=device,
+    )
+    processor = AutoProcessor.from_pretrained(args.model_id)
+
+    image = load_image(args.image)
+    messages = build_messages(args.prompt)
+    prompt = processor.apply_chat_template(messages, add_generation_prompt=True)
+
+    model_inputs = processor(
+        image,
+        prompt,
+        add_special_tokens=False,
+        return_tensors="pt",
+    ).to(model.device)
+
+    generate_kwargs = {
+        "max_new_tokens": args.max_new_tokens,
+        "do_sample": args.temperature > 0,
     }
+    if args.temperature > 0:
+        generate_kwargs["temperature"] = args.temperature
+        generate_kwargs["top_p"] = args.top_p
 
-    text_config = {
-        "vocab_size": 128257,
-        "hidden_size": 1024,
-        "n_heads": 16,
-        "n_layers": 8,
-        "hidden_dim": 4096,
-        "max_position_embeddings": 2048,
-        "dtype": torch.float32,
-    }
-
-    return MLLAMAConfig(
-        vision_config=vision_config,
-        text_config=text_config,
-        projection_dim=text_config["hidden_size"],
-        image_token_index=128256,
-    )
+    output = model.generate(**model_inputs, **generate_kwargs)
+    continuation = output[:, model_inputs["input_ids"].shape[-1] :]
+    decoded = processor.decode(continuation[0], skip_special_tokens=True)
+    return decoded.strip()
 
 
-def load_checkpoint_if_available(model, checkpoint_path):
-    if checkpoint_path is None:
-        return
-
-    checkpoint_path = Path(checkpoint_path)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-    state = torch.load(checkpoint_path, map_location="cpu")
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    if missing:
-        print(f"Missing keys while loading checkpoint: {len(missing)}")
-    if unexpected:
-        print(f"Unexpected keys while loading checkpoint: {len(unexpected)}")
-
-
-def run(args):
-    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
-
-    config = build_default_config()
-    model = MllamaForConditionalGeneration(config).to(device)
-    model.eval()
-
-    load_checkpoint_if_available(model, args.checkpoint)
-
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-    tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
-
-    num_image_tokens = (config.vision_config.image_size // config.vision_config.patch_size) ** 2
-    processor = MllamaImageProcessor(
-        tokenizer=tokenizer,
-        num_image_token=num_image_tokens,
-        image_size=config.vision_config.image_size,
-    )
-
-    image = Image.open(args.image).convert("RGB")
-    batch = processor([args.prompt], [image], padding=True)
-
-    input_ids = batch["input_ids"].to(device)
-    attention_mask = batch["attention_mask"].to(device)
-    pixel_values = batch["pixel_value"].to(
-        device=device,
-        dtype=model.language_model.model.tok_emb.weight.dtype,
-    )
-
-    with torch.no_grad():
-        outputs = model(
-            input_ids=input_ids,
-            pixel_values=pixel_values,
-            attention_mask=attention_mask,
-        )
-
-    next_token = outputs["logits"][0, -1].argmax(dim=-1, keepdim=True)
-    generated = torch.cat([input_ids[0], next_token.cpu()], dim=0)
-    decoded = tokenizer.decode(generated, skip_special_tokens=True)
-
-    print(decoded)
+def main() -> None:
+    args = parse_args()
+    result = run_inference(args)
+    print(result)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run multimodal inference")
-    parser.add_argument("--image", required=True, help="Path to input image")
-    parser.add_argument("--prompt", required=True, help="Prompt text")
-    parser.add_argument("--tokenizer", default="hf-internal-testing/llama-tokenizer")
-    parser.add_argument("--checkpoint", default=None, help="Optional .pt checkpoint path")
-    parser.add_argument("--cpu", action="store_true", help="Force CPU")
-    run(parser.parse_args())
+    main()
