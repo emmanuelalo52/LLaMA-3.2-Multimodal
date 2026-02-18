@@ -199,7 +199,7 @@ class SiglipVisionTransformer(nn.Module):
         #dimension [Batch_size,channels,height,width] -> dimension[Batch_size,num_patches,Embed_dim]
         hidden_states = self.embedding(pixel_values)
         last_hidden_state = self.encoder(hidden_states)
-        last_hidden_state = self.post_layernorm(last_hidden_state)
+        last_hidden_state = self.layernorm(last_hidden_state)
 
         return last_hidden_state
 #Siglip Model

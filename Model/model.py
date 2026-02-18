@@ -1,16 +1,15 @@
+import importlib.util
 import torch.nn as nn
 import torch
-import torch.nn.functional as Functional
-import urllib
-import zipfile
-import os
-from pathlib import Path
-from safetensors.torch import load_file
-import tiktoken
-from tiktoken.load import load_tiktoken_bpe
-from siglip import SiglipVisionConfig,SiglipModel
-import rmsnorm
-from ..Tools.swiglu.FusedSwiglu import FusedSwiGLU
+
+from .siglip import SiglipVisionConfig, SiglipModel
+from Tools.swiglu.FusedSwiglu import FusedSwiGLU
+
+HAS_RMSNORM_EXT = importlib.util.find_spec("rmsnorm") is not None
+if HAS_RMSNORM_EXT:
+    rmsnorm = __import__("rmsnorm")
+
+
 class KVCache():
 
     def __init__(self):
@@ -156,15 +155,11 @@ class RMSNormFunction(torch.autograd.Function):
     def forward(ctx, x, weight, eps, residual=None):
         x = x.contiguous()
         weight = weight.contiguous()
-        
-        # If fused, we pass the residual to the kernel for in-place addition
-        if residual is not None:
-            residual = residual.contiguous()
-            # The kernel now takes 5 tensor arguments: out, rms, input, weight, residual
-            output, rms = rmsnorm.forward(x, weight, residual, eps)
-        else:
-            # Fallback for standard RMSNorm (e.g., final_norm)
-            output, rms = rmsnorm.forward(x, weight, eps)
+
+        if residual is None:
+            residual = torch.zeros_like(x)
+        residual = residual.contiguous()
+        output, rms = rmsnorm.forward(x, weight, residual, eps)
             
         ctx.save_for_backward(x, weight, rms)
         ctx.eps = eps
@@ -190,8 +185,14 @@ class LLAMARMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x, residual=None):
-        # Pass the residual tensor to the autograd function
-        return RMSNormFunction.apply(x, self.weight, self.eps, residual)
+        if HAS_RMSNORM_EXT and x.is_cuda and x.dtype in (torch.float16, torch.bfloat16):
+            return RMSNormFunction.apply(x, self.weight, self.eps, residual)
+
+        if residual is not None:
+            x = x + residual
+        variance = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.eps)
+        return x * self.weight
 
 class LLAMARotaryEmbedding(nn.Module):
     def __init__(self,config:LLAMA32Config, device=None):
@@ -246,7 +247,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
 
 # Feed forward
 class FusedFeedforward(nn.Module):
-    def __init__(self,hidden_size,intermediate_size,bias=False):
+    def __init__(self, hidden_size, intermediate_size, bias=False):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -329,7 +330,7 @@ class TransformerBlock(nn.Module):
         self.att = GroupQueryAttention(config, layer_idx=layer_idx, dtype=config.dtype)
         self.norm1 = LLAMARMSNorm(dim=config.hidden_size, eps=config.rms_norm_eps) 
         self.norm2 = LLAMARMSNorm(dim=config.hidden_size, eps=config.rms_norm_eps)
-        self.ff = FusedFeedforward(config)
+        self.ff = FusedFeedforward(config.hidden_size, config.hidden_dim)
 
     def forward(self, hidden_states, attention_mask=None, position_ids=None, kv_cache=None):
         # 1. Self Attention with Fused Add-RMSNorm
@@ -363,7 +364,7 @@ class TransformerBlock(nn.Module):
 class MultiModalProjector(nn.Module):
     def __init__(self,config:MLLAMAConfig):
         super().__init__()
-        self.linear = nn.Linear(config.vision_config.hidden_size,config.vision_config.projection_dim)
+        self.linear = nn.Linear(config.vision_config.hidden_size, config.text_config.hidden_size)
     def forward(self,image_features):
         hidden_states = self.linear(image_features)
         return hidden_states
@@ -385,6 +386,34 @@ class Llama3Model(nn.Module):
     def get_input_embeddings(self):
         return self.tok_emb
 
+    def _prepare_attention_mask(self, attention_mask, hidden_state):
+        bsz, seq_len, _ = hidden_state.shape
+        device = hidden_state.device
+
+        if attention_mask is None:
+            base_mask = torch.ones((bsz, seq_len), device=device, dtype=hidden_state.dtype)
+        elif attention_mask.dim() == 2:
+            base_mask = attention_mask.to(device=device, dtype=hidden_state.dtype)
+        elif attention_mask.dim() == 4:
+            return attention_mask.to(device=device, dtype=hidden_state.dtype)
+        else:
+            raise ValueError("attention_mask must be 2D or 4D")
+
+        causal = torch.full((seq_len, seq_len), float("-inf"), device=device, dtype=hidden_state.dtype)
+        causal = torch.triu(causal, diagonal=1)
+        causal = causal.unsqueeze(0).unsqueeze(0).expand(bsz, 1, seq_len, seq_len)
+
+        padding = (1.0 - base_mask) * torch.finfo(hidden_state.dtype).min
+        padding = padding[:, None, None, :].expand(bsz, 1, seq_len, seq_len)
+        return causal + padding
+
+    def _prepare_position_ids(self, position_ids, hidden_state):
+        if position_ids is not None:
+            return position_ids.to(hidden_state.device)
+
+        seq_len = hidden_state.shape[1]
+        return torch.arange(seq_len, device=hidden_state.device).unsqueeze(0).expand(hidden_state.shape[0], -1)
+
     def forward(self, input_ids=None, input_embeds=None, attention_mask=None, 
                 position_ids=None, kv_cache=None):
         if input_embeds is not None:
@@ -394,9 +423,11 @@ class Llama3Model(nn.Module):
         else:
             raise ValueError("Either input_ids or input_embeds must be provided")
 
-        # Apply scaling (this is optional, some models do this)
-        normalizer = torch.tensor(self.config.hidden_size ** 0.5, dtype=hidden_state.dtype)
+        normalizer = torch.tensor(self.config.hidden_size ** 0.5, dtype=hidden_state.dtype, device=hidden_state.device)
         hidden_state = hidden_state * normalizer
+
+        attention_mask = self._prepare_attention_mask(attention_mask, hidden_state)
+        position_ids = self._prepare_position_ids(position_ids, hidden_state)
 
         for block in self.trf_blocks:
             hidden_state = block(
@@ -415,6 +446,7 @@ class Llama3ForCausalLM(nn.Module):
         self.model = Llama3Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
 
     def forward(self, input_ids=None, input_embeds=None, attention_mask=None, 
                 position_ids=None, kv_cache=None):
