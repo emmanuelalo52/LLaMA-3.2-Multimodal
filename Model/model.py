@@ -9,7 +9,6 @@ HAS_RMSNORM_EXT = importlib.util.find_spec("rmsnorm") is not None
 if HAS_RMSNORM_EXT:
     rmsnorm = __import__("rmsnorm")
 
-
 class KVCache:
     def __init__(self):
         self.key_cache: list = []
