@@ -28,6 +28,7 @@ At inference time the patch embeddings are spliced directly into the token embed
 │   ├── processing_mllama.py   Image preprocessing and tokenisation
 │   ├── utils.py               Weight loading from HF checkpoints
 │   └── __init__.py
+|   └── download_weights.py    Downloads instruct weights from HuggingFace
 ├── Tools/
 │   ├── rmsnorm/
 │   │   ├── rmsnorm.cu         Fused Add-RMSNorm CUDA kernel
@@ -40,8 +41,6 @@ At inference time the patch embeddings are spliced directly into the token embed
 │       └── __init__.py
 ├── Inference/
 │   └── Inference.py           Autoregressive inference script
-├── weights/
-│   └── download_weights.py    Downloads instruct weights from HuggingFace
 └── setup.py                   Builds the CUDA extensions
 ```
 
